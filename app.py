@@ -5,10 +5,10 @@ import re
 from contextlib import asynccontextmanager
 
 import asyncpg
-from catalog import REGIONS, OTHER, keyboard, makes, models, matches, settlements
+from catalog import REGIONS, OTHER, keyboard, makes, models, matches, settlements, PLACES
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, Update
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, Update, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from fastapi import FastAPI, Request, HTTPException
 
 logging.basicConfig(level=logging.INFO)
@@ -28,11 +28,131 @@ sessions = {}
 menu = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="🚘 Створити оголошення"), KeyboardButton(text="🔎 Пошук")],
     [KeyboardButton(text="📋 Мої оголошення"), KeyboardButton(text="❌ Скасувати")],
-], resize_keyboard=True)
+], resize_keyboard=True, is_persistent=True)
 categories = ReplyKeyboardMarkup(keyboard=[
     *[[KeyboardButton(text=x)] for x in GROUPS],
     [KeyboardButton(text="❌ Скасувати")],
 ], resize_keyboard=True)
+
+
+
+@dp.message(F.new_chat_members)
+async def welcome_member(m: Message):
+    if m.chat.type not in ("group", "supergroup"):
+        return
+    newcomers = [u for u in m.new_chat_members if not u.is_bot]
+    if not newcomers:
+        return
+    me = await bot.get_me()
+    buttons = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🚀 Створити оголошення через бота",
+                             url=f"https://t.me/{me.username}?start=group")
+    ]])
+    await m.answer(
+        "🇺🇦 Вітаємо в АВТО МОТО УКРАЇНА!\n"
+        "🚘 Тут безкоштовно продають та купують транспорт, техніку й запчастини.\n"
+        "✍️ Публікуй оголошення самостійно або через наш бот 👇",
+        reply_markup=buttons,
+    )
+
+
+def region_places(code):
+    return sorted([p for p in PLACES if p[0] == code], key=lambda p: (p[1].casefold(), p[3]))
+
+
+def selections(s):
+    step, d = s["step"], s["data"]
+    if step == "make":
+        return makes(d["category"])
+    if step == "model":
+        return models(d["category"], d["make"])
+    if step == "region":
+        return sorted(REGIONS)
+    if step == "city_letter":
+        return s["letters"]
+    if step == "city_pick":
+        return s["place_labels"]
+    return []
+
+
+def selection_keyboard(s, page=0):
+    values = selections(s)
+    max_page = max(0, (len(values) - 1) // 12)
+    page = max(0, min(max_page, page))
+    rows = []
+    for j in range(page * 12, min((page + 1) * 12, len(values)), 2):
+        rows.append([InlineKeyboardButton(text=values[i][:60], callback_data=f"select:v:{i}")
+                     for i in range(j, min(j+2, len(values)))])
+    controls = []
+    if page:
+        controls.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"select:p:{page-1}"))
+    if page < max_page:
+        controls.append(InlineKeyboardButton(text="Далі ➡️", callback_data=f"select:p:{page+1}"))
+    if controls:
+        rows.append(controls)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def show_selection(m, s):
+    prompts = {"make": "🚘 Обери марку:", "model": "🚗 Обери модель:",
+               "region": "📍 Обери область:", "city_letter": "🔤 Обери першу літеру населеного пункту:",
+               "city_pick": "🏘️ Обери населений пункт:"}
+    await m.answer(prompts[s["step"]], reply_markup=selection_keyboard(s))
+
+
+@dp.callback_query(F.data.startswith("select:"))
+async def select_callback(c: CallbackQuery):
+    s = sessions.get(c.from_user.id)
+    if not s or s["step"] not in ("make", "model", "region", "city_letter", "city_pick"):
+        await c.answer("Це меню вже неактуальне.", show_alert=True)
+        return
+    try:
+        _, action, raw = c.data.split(":")
+        index = int(raw)
+    except (ValueError, AttributeError):
+        await c.answer("Помилка вибору")
+        return
+    if action == "p":
+        await c.message.edit_reply_markup(reply_markup=selection_keyboard(s, index))
+        await c.answer()
+        return
+    options = selections(s)
+    if action != "v" or index < 0 or index >= len(options):
+        await c.answer("Некоректний вибір")
+        return
+    chosen = options[index]
+    d, step = s["data"], s["step"]
+    if step == "make":
+        d["make"] = chosen
+        s["step"] = "model"
+        await show_selection(c.message, s)
+    elif step == "model":
+        d["model"] = chosen
+        d["title"] = d["make"] + " " + chosen
+        await ask_next(c.message, s)
+    elif step == "region":
+        d["region"] = chosen
+        d["region_code"] = REGIONS[chosen]
+        if chosen in ("Київ", "Севастополь"):
+            d["city"] = chosen
+        await ask_next(c.message, s)
+    elif step == "city_letter":
+        s["place_items"] = [p for p in region_places(d["region_code"]) if p[1].upper().startswith(chosen)]
+        s["place_labels"] = [f"{p[1]} ({p[3]} р-н)" for p in s["place_items"]]
+        s["step"] = "city_pick"
+        await show_selection(c.message, s)
+    elif step == "city_pick":
+        p = s["place_items"][index]
+        d["city"] = f"{p[1]}, {d['region']}"
+        d["katottg"] = p[4]
+        for key in ("place_items", "place_labels", "letters"):
+            s.pop(key, None)
+        await ask_next(c.message, s)
+    await c.answer()
+    try:
+        await c.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
 
 
 @dp.message(CommandStart())
@@ -101,13 +221,13 @@ CONFIRM = ReplyKeyboardMarkup(keyboard=[
 
 def next_question(d):
     fields = [
-        *(([("make", "🚘 Введи кілька літер марки, щоб обрати зі списку:")]) if d["category"] != "⚙️ Запчастини" else [("title", "🏷️ Назва запчастини?")]),
+        *(([("make", "🚘 Обери марку зі списку:")]) if d["category"] != "⚙️ Запчастини" else [("title", "🏷️ Назва запчастини?")]),
         *EXTRAS[d["category"]],
         ("description", "📝 Коротко опиши стан і особливості товару:"),
         ("price", "💰 Вкажи ціну тільки цифрами (наприклад 8500):"),
         ("currency", "💵 Обери валюту:"),
         ("region", "📍 Обери область України:"),
-        ("city", "🏘️ Введи щонайменше 2 літери населеного пункту для пошуку:"),
+        ("city", "🏘️ Обери населений пункт зі списку:"),
         ("contact", "Телефон або Telegram для зв'язку?"),
         ("photo", "📸 Надішли фотографію товару. Без фото оголошення не опублікується."),
     ]
@@ -154,10 +274,12 @@ async def ask_next(m, s):
             await m.answer_photo(s["data"]["photo_id"], **preview_kwargs)
         await m.answer("Перевір оголошення. Опублікувати чи почати заново?", reply_markup=CONFIRM)
     else:
-        if step == "region":
-            await m.answer(prompt, reply_markup=keyboard(sorted(REGIONS), 2))
-        elif step == "make":
-            await m.answer(prompt + "\n💡 Наприклад: Volks, Toyota, МТЗ, John.", reply_markup=keyboard([OTHER]))
+        if step in ("make", "region"):
+            await show_selection(m, s)
+        elif step == "city":
+            s["letters"] = sorted({p[1][0].upper() for p in region_places(s["data"]["region_code"]) if p[1]})
+            s["step"] = "city_letter"
+            await show_selection(m, s)
         else:
             await m.answer(prompt, reply_markup=CURRENCY if step == "currency" else menu)
 
@@ -248,92 +370,8 @@ async def wizard(m: Message):
         d["category"] = value
         await ask_next(m, s)
         return
-    if step == "make":
-        values = makes(d["category"])
-        if value == OTHER:
-            s["step"] = "custom_make"
-            await m.answer("✍️ Напиши назву виробника:")
-            return
-        exact = next((x for x in values if x.casefold() == value.casefold()), None)
-        if exact:
-            d["make"] = exact
-            s["step"] = "model"
-            await m.answer("🚘 Введи кілька літер моделі або обери зі списку:\n💡 Можна обрати іншу модель.",
-                           reply_markup=keyboard([*models(d["category"], exact)[:10], OTHER]))
-            return
-        found = matches(values, value)
-        await m.answer("🔎 Обери марку зі списку або уточни пошук:" if found else "Марку не знайдено. Спробуй іншу назву або вибери «Інша марка / модель».",
-                       reply_markup=keyboard([*found, OTHER]))
-        return
-    if step == "custom_make":
-        if not value or len(value) > 70:
-            await m.answer("✍️ Введи назву виробника (до 70 символів).")
-            return
-        d["make"] = value
-        s["step"] = "custom_model"
-        await m.answer("✍️ Введи назву або номер моделі:")
-        return
-    if step == "model":
-        if value == OTHER:
-            s["step"] = "custom_model"
-            await m.answer("✍️ Введи свою модель:")
-            return
-        choices = models(d["category"], d["make"])
-        exact = next((x for x in choices if x.casefold() == value.casefold()), None)
-        if exact:
-            d["model"] = exact
-            d["title"] = d["make"] + " " + exact
-            await ask_next(m, s)
-            return
-        found = matches(choices, value)
-        await m.answer("🔎 Обери модель або уточни пошук:" if found else "Модель не знайдена. Обери «Інша марка / модель».",
-                       reply_markup=keyboard([*found, OTHER]))
-        return
-    if step == "custom_model":
-        if not value or len(value) > 80:
-            await m.answer("✍️ Введи модель (до 80 символів).")
-            return
-        d["model"] = value
-        d["title"] = d["make"] + " " + value
-        await ask_next(m, s)
-        return
-    if step == "region":
-        if value not in REGIONS:
-            await m.answer("📍 Обери область кнопкою.", reply_markup=keyboard(sorted(REGIONS)))
-            return
-        d["region"] = value
-        d["region_code"] = REGIONS[value]
-        if value in ("Київ", "Севастополь"):
-            d["city"] = value
-        await ask_next(m, s)
-        return
-    if step == "city":
-        found = settlements(d["region_code"], value)
-        if not found:
-            await m.answer("🏘️ Нічого не знайдено. Введи від 2 літер назви населеного пункту.")
-            return
-        choices = {}
-        for idx, item in enumerate(found, 1):
-            kind = {"M": "м.", "C": "с.", "X": "с-ще"}.get(item[2], "")
-            label = f"{idx}. {kind} {item[1]} ({item[3]} р-н)"
-            choices[label] = item
-        s["choices"] = choices
-        s["step"] = "place_choose"
-        await m.answer("🏘️ Обери населений пункт зі списку:", reply_markup=keyboard([*choices, "🔎 Інший пошук"], 1))
-        return
-    if step == "place_choose":
-        if value == "🔎 Інший пошук":
-            s["step"] = "city"
-            await m.answer("🔎 Введи інші літери назви населеного пункту:", reply_markup=menu)
-            return
-        item = s.get("choices", {}).get(value)
-        if not item:
-            await m.answer("🏘️ Обери результат кнопкою або натисни «Інший пошук».")
-            return
-        d["city"] = f"{item[1]}, {d['region']}"
-        d["katottg"] = item[4]
-        s.pop("choices", None)
-        await ask_next(m, s)
+    if step in ("make", "model", "region", "city", "city_letter", "city_pick"):
+        await m.answer("👇 Обери варіант кнопкою в повідомленні вище.", reply_markup=menu)
         return
     if step == "photo":
         if m.photo:
