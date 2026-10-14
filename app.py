@@ -2,8 +2,7 @@ import os
 import logging
 from contextlib import asynccontextmanager
 
-import aiosqlite
-from pathlib import Path
+import asyncpg
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, Update
@@ -11,6 +10,7 @@ from fastapi import FastAPI, Request, HTTPException
 
 logging.basicConfig(level=logging.INFO)
 TOKEN = os.environ["BOT_TOKEN"]
+DB_URL = os.environ["DATABASE_URL"]
 PUBLIC_URL = os.environ["PUBLIC_URL"].rstrip("/")
 SECRET = os.environ["WEBHOOK_SECRET"]
 GROUPS = {
@@ -69,8 +69,8 @@ async def search(m: Message):
 async def mine(m: Message):
     if not m.from_user:
         return
-    async with db.execute("SELECT id,title,price,city FROM ads WHERE user_id=? ORDER BY id DESC LIMIT 10", (m.from_user.id,)) as cursor:
-        rows = await cursor.fetchall()
+    async with db.acquire() as con:
+        rows = await con.fetch("SELECT id,title,price,city FROM ads WHERE user_id=$1 ORDER BY id DESC LIMIT 10", m.from_user.id)
     await m.answer("\n\n".join(f"№{r['id']} — {r['title']}, {r['price']}, {r['city']}" for r in rows) or "Оголошень немає.", reply_markup=menu)
 
 
@@ -88,11 +88,11 @@ async def wizard(m: Message):
         if len(value) < 2 or len(value) > 100:
             await m.answer("Введи від 2 до 100 символів.")
             return
-        async with db.execute(
-                "SELECT id,category,title,price,city FROM ads WHERE status='active' AND (LOWER(title) LIKE ? OR LOWER(description) LIKE ?) ORDER BY id DESC LIMIT 10",
-                ("%" + value.lower() + "%", "%" + value.lower() + "%")
-            ) as cursor:
-            rows = await cursor.fetchall()
+        async with db.acquire() as con:
+            rows = await con.fetch(
+                "SELECT id,category,title,price,city FROM ads WHERE status='active' AND (title ILIKE $1 OR description ILIKE $1) ORDER BY id DESC LIMIT 10",
+                "%" + value.replace("%", r"\%").replace("_", r"\_") + "%"
+            )
         sessions.pop(m.from_user.id, None)
         await m.answer("\n\n".join(f"№{r['id']} {r['category']}\n{r['title']}\n💰 {r['price']} 📍 {r['city']}" for r in rows) or "Нічого не знайдено.", reply_markup=menu)
         return
@@ -125,14 +125,13 @@ async def wizard(m: Message):
         elif value.lower() != "пропустити":
             await m.answer("Надішли фотографію або напиши «Пропустити».")
             return
-        async with db.execute(
+        async with db.acquire() as con:
+            ad_id = await con.fetchval(
                 """INSERT INTO ads (user_id,username,category,title,description,price,city,contact,photo_id)
-                VALUES (?,?,?,?,?,?,?,?,?)""",
-                (m.from_user.id, m.from_user.username, d["category"], d["title"],
-                d["description"], d["price"], d["city"], d["contact"], d.get("photo_id"))
-            ) as cursor:
-            ad_id = cursor.lastrowid
-        await db.commit()
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id""",
+                m.from_user.id, m.from_user.username, d["category"], d["title"],
+                d["description"], d["price"], d["city"], d["contact"], d.get("photo_id")
+            )
         content = (f"🚘 {d['title']}\n📂 {d['category']}\n📝 {d['description']}\n"
                    f"💰 {d['price']}\n📍 {d['city']}\n☎️ {d['contact']}\n🔖 №{ad_id}")
         published = False
@@ -153,20 +152,17 @@ async def wizard(m: Message):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global db
-    db_path = Path(os.getenv("SQLITE_PATH", "/var/data/automoto.db"))
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    db = await aiosqlite.connect(str(db_path))
-    db.row_factory = aiosqlite.Row
-    await db.execute("""CREATE TABLE IF NOT EXISTS ads (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL, username TEXT, category TEXT NOT NULL,
-        title TEXT NOT NULL, description TEXT NOT NULL, price TEXT NOT NULL,
-        city TEXT NOT NULL, contact TEXT NOT NULL, photo_id TEXT,
-        status TEXT NOT NULL DEFAULT 'active',
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-    )""")
-    await db.execute("CREATE INDEX IF NOT EXISTS ads_user_idx ON ads(user_id)")
-    await db.commit()
+    db = await asyncpg.create_pool(DB_URL, min_size=1, max_size=3)
+    async with db.acquire() as con:
+        await con.execute("""CREATE TABLE IF NOT EXISTS ads (
+            id BIGSERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL, username TEXT, category TEXT NOT NULL,
+            title TEXT NOT NULL, description TEXT NOT NULL, price TEXT NOT NULL,
+            city TEXT NOT NULL, contact TEXT NOT NULL, photo_id TEXT,
+            status TEXT NOT NULL DEFAULT 'active',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        )""")
+        await con.execute("CREATE INDEX IF NOT EXISTS ads_user_idx ON ads(user_id)")
     await bot.set_webhook(PUBLIC_URL + "/telegram", secret_token=SECRET)
     yield
     await bot.delete_webhook()
