@@ -303,6 +303,8 @@ async def wizard(m: Message):
             return
         d["region"] = value
         d["region_code"] = REGIONS[value]
+        if value in ("Київ", "Севастополь"):
+            d["city"] = value
         await ask_next(m, s)
         return
     if step == "city":
