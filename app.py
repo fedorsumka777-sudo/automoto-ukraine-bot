@@ -1,5 +1,7 @@
 import os
 import logging
+import html
+import re
 from contextlib import asynccontextmanager
 
 import asyncpg
@@ -72,6 +74,132 @@ async def mine(m: Message):
     await m.answer("\n\n".join(f"№{r['id']} — {r['title']}, {r['price']}, {r['city']}" for r in rows) or "Оголошень немає.", reply_markup=menu)
 
 
+EXTRAS = {
+    "🚗 Авторинок": [
+        ("year", "Рік випуску? (наприклад 2012)"),
+        ("spec", "Пробіг у км? (наприклад 185000)"),
+    ],
+    "🚜 Агромаркет": [
+        ("year", "Рік випуску техніки?"),
+        ("spec", "Тип і стан техніки? (наприклад трактор, справний)"),
+    ],
+    "⚙️ Запчастини": [
+        ("year", "Для якої техніки / моделі підходить?"),
+        ("spec", "Стан: нова чи б/в?"),
+    ],
+}
+CURRENCY = ReplyKeyboardMarkup(keyboard=[
+    [KeyboardButton(text="🇺🇦 UAH (грн)"), KeyboardButton(text="🇺🇸 USD ($)")],
+    [KeyboardButton(text="❌ Скасувати")],
+], resize_keyboard=True)
+CONFIRM = ReplyKeyboardMarkup(keyboard=[
+    [KeyboardButton(text="✅ Опублікувати"), KeyboardButton(text="✏️ Почати заново")],
+    [KeyboardButton(text="❌ Скасувати")],
+], resize_keyboard=True)
+
+
+def next_question(d):
+    fields = [
+        ("title", "Марка, модель або назва товару?"),
+        *EXTRAS[d["category"]],
+        ("description", "Коротко опиши стан і особливості товару:"),
+        ("price", "Вкажи ціну тільки цифрами (наприклад 8500):"),
+        ("currency", "Обери валюту:"),
+        ("city", "Місто або область?"),
+        ("contact", "Телефон або Telegram для зв'язку?"),
+        ("photo", "📸 Надішли фотографію товару. Без фото оголошення не опублікується."),
+    ]
+    for field, prompt in fields:
+        if field not in d:
+            return field, prompt
+    return "preview", ""
+
+
+def render_ad(d, user_id, username, first_name, ad_id=None):
+    category = d["category"]
+    extra = EXTRAS[category]
+    who = "@" + html.escape(username) if username else (
+        f'<a href="tg://user?id={user_id}">{html.escape(first_name or "Продавець")}</a>'
+    )
+    lines = [
+        f"<b>{html.escape(d['title'])}</b>",
+        html.escape(category),
+        f"🔹 {html.escape(extra[0][1].split('?')[0])}: {html.escape(d[extra[0][0]])}",
+        f"🔹 {html.escape(extra[1][1].split('?')[0])}: {html.escape(d[extra[1][0]])}",
+        f"📝 {html.escape(d['description'])}",
+        f"💰 <b>{html.escape(d['price'])} {html.escape(d['currency'])}</b>",
+        f"📍 {html.escape(d['city'])}",
+        f"☎️ {html.escape(d['contact'])}",
+        f"👤 Продавець: {who}",
+    ]
+    if ad_id is not None:
+        lines.append(f"🔖 Оголошення №{ad_id}")
+    return "\n".join(lines)
+
+
+async def ask_next(m, s):
+    step, prompt = next_question(s["data"])
+    s["step"] = step
+    if step == "preview":
+        await m.answer_photo(
+            s["data"]["photo_id"],
+            caption=render_ad(s["data"], m.from_user.id, m.from_user.username, m.from_user.first_name),
+            parse_mode="HTML",
+            reply_markup=CONFIRM,
+        )
+        await m.answer("Перевір оголошення. Опублікувати чи почати заново?", reply_markup=CONFIRM)
+    else:
+        await m.answer(prompt, reply_markup=CURRENCY if step == "currency" else menu)
+
+
+@dp.message(F.text == "✏️ Почати заново")
+async def restart(m: Message):
+    if not m.from_user or m.chat.type != "private":
+        return
+    sessions[m.from_user.id] = {"step": "category", "data": {}}
+    await m.answer("Обери категорію:", reply_markup=categories)
+
+
+@dp.message(F.text == "✅ Опублікувати")
+async def publish(m: Message):
+    if not m.from_user or m.chat.type != "private":
+        return
+    s = sessions.get(m.from_user.id)
+    if not s or s["step"] != "preview":
+        await m.answer("Немає готового оголошення. Натисни /start.")
+        return
+    s["step"] = "publishing"
+    d = s["data"]
+    extras = EXTRAS[d["category"]]
+    description = (f"{extras[0][1]} {d[extras[0][0]]}\n"
+                   f"{extras[1][1]} {d[extras[1][0]]}\n{d['description']}")
+    try:
+        async with db.acquire() as con:
+            ad_id = await con.fetchval(
+                """INSERT INTO ads (user_id,username,category,title,description,price,city,contact,photo_id)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id""",
+                m.from_user.id, m.from_user.username, d["category"], d["title"],
+                description, f"{d['price']} {d['currency']}", d["city"], d["contact"], d["photo_id"]
+            )
+        target = GROUPS[d["category"]]
+        try:
+            await bot.send_photo(
+                target, d["photo_id"],
+                caption=render_ad(d, m.from_user.id, m.from_user.username, m.from_user.first_name, ad_id),
+                parse_mode="HTML"
+            )
+            status = "✅ Оголошення опубліковано в групі!"
+        except Exception:
+            logging.exception("Failed to publish ad %s", ad_id)
+            status = "⚠️ Оголошення збережено, але публікація в групі не вдалася. Повідом адміністратора."
+        sessions.pop(m.from_user.id, None)
+        await m.answer(f"{status}\nНомер №{ad_id}", reply_markup=menu)
+    except Exception:
+        s["step"] = "preview"
+        logging.exception("Failed to save ad")
+        await m.answer("Помилка збереження. Спробуй підтвердити ще раз.", reply_markup=CONFIRM)
+
+
 @dp.message()
 async def wizard(m: Message):
     if not m.from_user or m.chat.type != "private":
@@ -82,6 +210,12 @@ async def wizard(m: Message):
         return
     step, d = s["step"], s["data"]
     value = (m.text or "").strip()
+    if step == "publishing":
+        await m.answer("Зачекай, оголошення публікується.")
+        return
+    if step == "preview":
+        await m.answer("Обери «✅ Опублікувати» або «✏️ Почати заново».", reply_markup=CONFIRM)
+        return
     if step == "search":
         if len(value) < 2 or len(value) > 100:
             await m.answer("Введи від 2 до 100 символів.")
@@ -99,52 +233,31 @@ async def wizard(m: Message):
             await m.answer("Обери категорію кнопкою.", reply_markup=categories)
             return
         d["category"] = value
-        s["step"] = "title"
-        await m.answer("Напиши марку, модель або назву товару:", reply_markup=menu)
-        return
-    prompts = {
-        "title": ("description", "Опиши характеристики та стан:"),
-        "description": ("price", "Вкажи ціну й валюту (наприклад 8500 USD):"),
-        "price": ("city", "Вкажи місто або область:"),
-        "city": ("contact", "Вкажи телефон або Telegram для зв'язку:"),
-        "contact": ("photo", "Надішли одне фото або напиши «Пропустити»:"),
-    }
-    if step in prompts:
-        if not value or len(value) > (100 if step in ("title","price","city","contact") else 900):
-            await m.answer("Введи коректний текст (для опису до 900 символів, для інших полів до 100).")
-            return
-        d[step] = value
-        s["step"], question = prompts[step]
-        await m.answer(question)
+        await ask_next(m, s)
         return
     if step == "photo":
-        if m.photo:
-            d["photo_id"] = m.photo[-1].file_id
-        elif value.lower() != "пропустити":
-            await m.answer("Надішли фотографію або напиши «Пропустити».")
+        if not m.photo:
+            await m.answer("📸 Фото обов'язкове. Надішли одне фото товару.")
             return
-        async with db.acquire() as con:
-            ad_id = await con.fetchval(
-                """INSERT INTO ads (user_id,username,category,title,description,price,city,contact,photo_id)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id""",
-                m.from_user.id, m.from_user.username, d["category"], d["title"],
-                d["description"], d["price"], d["city"], d["contact"], d.get("photo_id")
-            )
-        content = (f"🚘 {d['title']}\n📂 {d['category']}\n📝 {d['description']}\n"
-                   f"💰 {d['price']}\n📍 {d['city']}\n☎️ {d['contact']}\n🔖 №{ad_id}")
-        published = False
-        target = GROUPS[d["category"]]
-        if target:
-            try:
-                if d.get("photo_id"):
-                    await bot.send_photo(target, d["photo_id"], caption=content[:1024])
-                else:
-                    await bot.send_message(target, content)
-                published = True
-            except Exception:
-                logging.exception("Cannot publish ad %s", ad_id)
-        sessions.pop(m.from_user.id, None)
-        await m.answer(f"✅ Оголошення №{ad_id} збережено!" + (" Опубліковано в групі." if published else " Публікація в групі поки недоступна."), reply_markup=menu)
+        d["photo_id"] = m.photo[-1].file_id
+        await ask_next(m, s)
+        return
+    if step == "currency":
+        if value not in ("🇺🇦 UAH (грн)", "🇺🇸 USD ($)"):
+            await m.answer("Обери валюту кнопкою.", reply_markup=CURRENCY)
+            return
+        d["currency"] = "грн" if "UAH" in value else "USD"
+    elif step == "price":
+        if not re.fullmatch(r"\d{1,10}(?:[.,]\d{1,2})?", value):
+            await m.answer("Введи суму цифрами, без валюти. Наприклад: 8500")
+            return
+        d[step] = value.replace(",", ".")
+    else:
+        if not value or len(value) > (280 if step == "description" else 90):
+            await m.answer("Введи коротку відповідь (до 90 символів, опис — до 280).")
+            return
+        d[step] = value
+    await ask_next(m, s)
 
 
 @asynccontextmanager
