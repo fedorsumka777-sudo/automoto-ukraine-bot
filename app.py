@@ -585,7 +585,8 @@ def parse_luna_listing(raw):
     if out["category"] not in GROUPS:
         out["category"] = ""
     if out["region"] not in REGIONS:
-        out["region"] = ""
+        normalized = out["region"].casefold().replace(" область", "").replace(" обл.", "").strip()
+        out["region"] = next((r for r in REGIONS if r.casefold().replace(" область","").strip() == normalized), "")
     if out["currency"] not in ("грн","USD"):
         out["currency"] = ""
     if not re.fullmatch(r"\\d{1,10}(?:[.,]\\d{1,2})?",out["price"]):
@@ -610,8 +611,13 @@ async def fill_from_luna(m,s):
         return
     d=s["data"]
     d.update({k:v for k,v in extracted.items() if v})
-    if d.get("make") and d.get("model") and not d.get("title"):
-        d["title"]=d["make"]+" "+d["model"]
+    if d.get("make") and d.get("model"):
+        d["title"] = d["make"] + " " + d["model"]
+    elif d.get("category") != "⚙️ Запчастини":
+        # Ask for full vehicle choice instead of producing an incomplete title.
+        d.pop("make", None)
+        d.pop("model", None)
+        d.pop("title", None)
     if d.get("region"):
         d["region_code"]=REGIONS[d["region"]]
     # Do not put a synthesized title in place of a missing vehicle make/model.
@@ -818,32 +824,6 @@ async def wizard(m: Message):
         return
     if step == "luna_processing":
         await m.answer("🤖 Луна ще опрацьовує опис.")
-        return
-    if step == "ai_done":
-        if value == "✨ Покращити опис з Луною":
-            await propose_luna(m, s)
-            return
-        if value == "➡️ Залишити мій опис":
-            d["ai_done"] = True
-            await ask_next(m, s)
-            return
-        await m.answer("Обери «✨ Покращити» або «➡️ Залишити мій опис».", reply_markup=AI_CHOICE)
-        return
-    if step == "ai_review":
-        if value == "✅ Використати опис Луни":
-            d["description"] = d.pop("ai_suggestion", d["description"])
-            d["ai_done"] = True
-            await ask_next(m, s)
-            return
-        if value == "🔄 Спробувати ще раз":
-            await propose_luna(m, s)
-            return
-        if value == "➡️ Залишити мій опис":
-            d.pop("ai_suggestion", None)
-            d["ai_done"] = True
-            await ask_next(m, s)
-            return
-        await m.answer("Обери одну з кнопок під варіантом Луни.", reply_markup=AI_CONFIRM)
         return
     if step == "search_filter":
         await m.answer("👇 Обери категорію кнопкою вище.")
