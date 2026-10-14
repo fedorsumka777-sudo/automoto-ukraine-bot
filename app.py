@@ -8,7 +8,7 @@ import asyncpg
 from catalog import REGIONS, OTHER, keyboard, makes, models, matches, settlements, PLACES
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, Update, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, InputMediaPhoto, InputMediaDocument, BotCommand
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, Update, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, InputMediaPhoto, InputMediaDocument, BotCommand, BotCommandScopeChat
 from fastapi import FastAPI, Request, HTTPException
 
 logging.basicConfig(level=logging.INFO)
@@ -16,6 +16,7 @@ TOKEN = os.environ["BOT_TOKEN"]
 DB_URL = os.environ["DATABASE_URL"]
 PUBLIC_URL = os.environ["PUBLIC_URL"].rstrip("/")
 SECRET = os.environ["WEBHOOK_SECRET"]
+ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))
 GROUPS = {
     "🚗 Авторинок": os.getenv("GROUP_AUTORINOK", "@AutoMotoAvtorunok"),
     "🚜 Агромаркет": os.getenv("GROUP_AGRO", "@AutoMotoAgromarket"),
@@ -50,6 +51,71 @@ async def pin_bot_entry(chat_id):
         reply_markup=markup,
     )
     await bot.pin_chat_message(chat_id, notice.message_id, disable_notification=True)
+
+
+async def track_update(update):
+    msg = update.message
+    cb = update.callback_query
+    user = msg.from_user if msg else (cb.from_user if cb else None)
+    if not user or user.is_bot:
+        return
+    chat = msg.chat if msg else (cb.message.chat if cb and cb.message else None)
+    if not chat or chat.type not in ("private", "group", "supergroup"):
+        return
+    if chat.type != "private" and chat.username and ("@" + chat.username).lower() not in [g.lower() for g in GROUPS.values()]:
+        return
+    event = "message"
+    if msg and chat.type == "private":
+        label = msg.text or ""
+        event = {"🚘 Створити оголошення":"create","🔎 Пошук":"search",
+                 "📋 Мої оголошення":"my_ads"}.get(label,
+                 "start" if label.startswith("/start") else "photo" if msg.photo else "message")
+    elif cb:
+        data = cb.data or ""
+        event = ("edit" if data.startswith(("editad:", "editfield:")) else
+                 "view" if data.startswith(("myad:", "found:")) else "button")
+    async with db.acquire() as con:
+        if chat.type == "private":
+            await con.execute("""INSERT INTO bot_users(user_id,username) VALUES($1,$2)
+              ON CONFLICT(user_id) DO UPDATE SET username=excluded.username,last_seen=now()""",
+              user.id,user.username)
+        await con.execute("INSERT INTO bot_activity(user_id,chat_id,scope,event) VALUES($1,$2,$3,$4)",
+                          user.id,chat.id,chat.type,event)
+
+
+@dp.message(F.text == "/admin")
+async def show_admin(m: Message):
+    if m.chat.type != "private" or not ADMIN_USER_ID or m.from_user.id != ADMIN_USER_ID:
+        return
+    async with db.acquire() as con:
+        total = await con.fetchval("SELECT count(*) FROM bot_users")
+        fresh = await con.fetchval("SELECT count(*) FROM bot_users WHERE first_seen>=now()-interval '7 days'")
+        active = await con.fetchval("SELECT count(DISTINCT user_id) FROM bot_activity WHERE scope='private' AND created_at>=now()-interval '7 days'")
+        actions = await con.fetch("""SELECT event,count(*) n FROM bot_activity WHERE scope='private'
+               AND created_at>=now()-interval '7 days' GROUP BY event ORDER BY n DESC LIMIT 6""")
+        ads = await con.fetchval("SELECT count(*) FROM ads")
+    labels = {"create":"Створювали оголошення","search":"Шукали","my_ads":"Мої оголошення",
+              "view":"Переглядали","edit":"Редагували","photo":"Надсилали фото",
+              "start":"Запускали","message":"Відповідали","button":"Натискали кнопки"}
+    lines = ["🛡 АДМІНКА | АВТО МОТО УКРАЇНА", "",
+             f"👤 Користувачі бота: {total}", f"🆕 Нові за 7 днів: {fresh}",
+             f"⚡ Активні за 7 днів: {active}",f"📋 Оголошень у базі: {ads}",
+             "", "📊 Дії за 7 днів:"]
+    lines.extend(f"• {labels.get(r['event'],r['event'])}: {r['n']}" for r in actions)
+    lines += ["", "👥 Групи:"]
+    for name,group in GROUPS.items():
+        try:
+            count = await bot.get_chat_member_count(group)
+            chat = await bot.get_chat(group)
+            async with db.acquire() as con:
+                row = await con.fetchrow("""SELECT count(*) messages,count(DISTINCT user_id) users
+                   FROM bot_activity WHERE chat_id=$1 AND scope<>'private'
+                   AND created_at>=now()-interval '7 days'""",chat.id)
+            lines.append(f"{name}: {count} учасників, {row['users']} активних, {row['messages']} повідомлень/7 днів")
+        except Exception:
+            lines.append(f"{name}: немає доступу до статистики")
+    lines.append("\nℹ️ Дані активності збираються з моменту оновлення. Для підрахунку всіх повідомлень потрібен вимкнений Privacy Mode.")
+    await m.answer("\n".join(lines),reply_markup=menu)
 
 
 @dp.message(F.text.startswith("/pinbot"))
@@ -707,8 +773,20 @@ async def lifespan(app: FastAPI):
         await con.execute("CREATE INDEX IF NOT EXISTS ads_user_idx ON ads(user_id)")
         await con.execute("ALTER TABLE ads ADD COLUMN IF NOT EXISTS group_chat_id BIGINT")
         await con.execute("ALTER TABLE ads ADD COLUMN IF NOT EXISTS group_message_id BIGINT")
+        await con.execute("""CREATE TABLE IF NOT EXISTS bot_users(
+            user_id BIGINT PRIMARY KEY, username TEXT, first_seen TIMESTAMPTZ DEFAULT now(),
+            last_seen TIMESTAMPTZ DEFAULT now())""")
+        await con.execute("""CREATE TABLE IF NOT EXISTS bot_activity(
+            id BIGSERIAL PRIMARY KEY, user_id BIGINT, chat_id BIGINT, scope TEXT,
+            event TEXT, created_at TIMESTAMPTZ DEFAULT now())""")
+        await con.execute("CREATE INDEX IF NOT EXISTS bot_activity_date_idx ON bot_activity(created_at)")
+        await con.execute("CREATE INDEX IF NOT EXISTS bot_activity_group_idx ON bot_activity(chat_id,created_at)")
     await bot.set_my_commands([BotCommand(command="start", description="🚀 Головне меню"),
                                BotCommand(command="help", description="ℹ️ Як користуватися ботом")])
+    if ADMIN_USER_ID:
+        await bot.set_my_commands([BotCommand(command="start",description="🚀 Головне меню"),
+                                   BotCommand(command="admin",description="🛡 Статистика")],
+                                  scope=BotCommandScopeChat(chat_id=ADMIN_USER_ID))
     await bot.set_webhook(PUBLIC_URL + "/telegram", secret_token=SECRET)
     yield
     # Do not delete webhook on shutdown: Render replaces instances during deploys.
@@ -729,5 +807,9 @@ async def telegram(request: Request):
     if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != SECRET:
         raise HTTPException(status_code=403)
     update = Update.model_validate(await request.json())
+    try:
+        await track_update(update)
+    except Exception:
+        logging.exception("Activity tracking error")
     await dp.feed_update(bot, update)
     return {"ok": True}
