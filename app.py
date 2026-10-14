@@ -8,7 +8,7 @@ import asyncpg
 from catalog import REGIONS, OTHER, keyboard, makes, models, matches, settlements, PLACES
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, Update, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, Update, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, InputMediaPhoto, InputMediaDocument
 from fastapi import FastAPI, Request, HTTPException
 
 logging.basicConfig(level=logging.INFO)
@@ -68,10 +68,6 @@ def selections(s):
         return models(d["category"], d["make"])
     if step == "region":
         return sorted(REGIONS)
-    if step == "city_letter":
-        return s["letters"]
-    if step == "city_pick":
-        return s["place_labels"]
     return []
 
 
@@ -90,20 +86,23 @@ def selection_keyboard(s, page=0):
         controls.append(InlineKeyboardButton(text="Далі ➡️", callback_data=f"select:p:{page+1}"))
     if controls:
         rows.append(controls)
+    if s["step"] == "make":
+        rows.append([InlineKeyboardButton(text="✍️ Інша марка", callback_data="select:custom:0")])
+    if s["step"] == "model":
+        rows.append([InlineKeyboardButton(text="✍️ Інша модель", callback_data="select:custom:0")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def show_selection(m, s):
     prompts = {"make": "🚘 Обери марку:", "model": "🚗 Обери модель:",
-               "region": "📍 Обери область:", "city_letter": "🔤 Обери першу літеру населеного пункту:",
-               "city_pick": "🏘️ Обери населений пункт:"}
+               "region": "📍 Обери область:"}
     await m.answer(prompts[s["step"]], reply_markup=selection_keyboard(s))
 
 
 @dp.callback_query(F.data.startswith("select:"))
 async def select_callback(c: CallbackQuery):
     s = sessions.get(c.from_user.id)
-    if not s or s["step"] not in ("make", "model", "region", "city_letter", "city_pick"):
+    if not s or s["step"] not in ("make", "model", "region"):
         await c.answer("Це меню вже неактуальне.", show_alert=True)
         return
     try:
@@ -114,6 +113,11 @@ async def select_callback(c: CallbackQuery):
         return
     if action == "p":
         await c.message.edit_reply_markup(reply_markup=selection_keyboard(s, index))
+        await c.answer()
+        return
+    if action == "custom" and s["step"] in ("make", "model"):
+        s["step"] = "custom_make" if s["step"] == "make" else "custom_model"
+        await c.message.answer("✍️ Введи назву марки:" if s["step"] == "custom_make" else "✍️ Введи модель:", reply_markup=menu)
         await c.answer()
         return
     options = selections(s)
@@ -135,18 +139,6 @@ async def select_callback(c: CallbackQuery):
         d["region_code"] = REGIONS[chosen]
         if chosen in ("Київ", "Севастополь"):
             d["city"] = chosen
-        await ask_next(c.message, s, c.from_user)
-    elif step == "city_letter":
-        s["place_items"] = [p for p in region_places(d["region_code"]) if p[1].upper().startswith(chosen)]
-        s["place_labels"] = [f"{p[1]} ({p[3]} р-н)" for p in s["place_items"]]
-        s["step"] = "city_pick"
-        await show_selection(c.message, s)
-    elif step == "city_pick":
-        p = s["place_items"][index]
-        d["city"] = f"{p[1]}, {d['region']}"
-        d["katottg"] = p[4]
-        for key in ("place_items", "place_labels", "letters"):
-            s.pop(key, None)
         await ask_next(c.message, s, c.from_user)
     await c.answer()
     try:
@@ -213,6 +205,7 @@ CURRENCY = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="🇺🇦 UAH (грн)"), KeyboardButton(text="🇺🇸 USD ($)")],
     [KeyboardButton(text="❌ Скасувати")],
 ], resize_keyboard=True)
+PHOTO_DONE = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="✅ Фото готові")], [KeyboardButton(text="❌ Скасувати")]], resize_keyboard=True)
 CONFIRM = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="✅ Опублікувати"), KeyboardButton(text="✏️ Почати заново")],
     [KeyboardButton(text="❌ Скасувати")],
@@ -227,9 +220,9 @@ def next_question(d):
         ("price", "💰 Вкажи ціну тільки цифрами (наприклад 8500):"),
         ("currency", "💵 Обери валюту:"),
         ("region", "📍 Обери область України:"),
-        ("city", "🏘️ Обери населений пункт зі списку:"),
+        ("city", "🏘️ Напиши назву міста, селища або села:"),
         ("contact", "Телефон або Telegram для зв'язку?"),
-        ("photo", "📸 Надішли фотографію товару. Без фото оголошення не опублікується."),
+        ("photo", "📸 Надішли щонайменше 5 фотографій (можна альбомом), максимум 10."),
     ]
     for field, prompt in fields:
         if field not in d:
@@ -244,13 +237,13 @@ def render_ad(d, user_id, username, first_name, ad_id=None):
         f'<a href="tg://user?id={user_id}">{html.escape(first_name or "Продавець")}</a>'
     )
     lines = [
+        f"<b>{html.escape(category.upper())}</b>",
         f"<b>{html.escape(d['title'])}</b>",
-        html.escape(category),
         f"🔹 {html.escape(extra[0][1].split('?')[0])}: {html.escape(d[extra[0][0]])}",
         f"🔹 {html.escape(extra[1][1].split('?')[0])}: {html.escape(d[extra[1][0]])}",
         f"📝 {html.escape(d['description'])}",
         f"💰 <b>{html.escape(d['price'])} {html.escape(d['currency'])}</b>",
-        f"📍 {html.escape(d['city'])}",
+        f"📍 {html.escape(d.get('region', ''))}, {html.escape(d['city'])}",
         f"☎️ {html.escape(d['contact'])}",
         f"👤 Продавець: {who}",
     ]
@@ -264,22 +257,12 @@ async def ask_next(m, s, user=None):
     step, prompt = next_question(s["data"])
     s["step"] = step
     if step == "preview":
-        preview_kwargs = {
-            "caption": render_ad(s["data"], user.id, user.username, user.first_name),
-            "parse_mode": "HTML",
-            "reply_markup": CONFIRM,
-        }
-        if s["data"].get("photo_kind") == "document":
-            await m.answer_document(s["data"]["photo_id"], **preview_kwargs)
-        else:
-            await m.answer_photo(s["data"]["photo_id"], **preview_kwargs)
+        await m.answer("📸 Додано фотографій: " + str(len(s["data"]["photos"])) + ". Перевір текст оголошення:")
+        await m.answer(render_ad(s["data"], user.id, user.username, user.first_name),
+                       parse_mode="HTML", reply_markup=CONFIRM)
         await m.answer("Перевір оголошення. Опублікувати чи почати заново?", reply_markup=CONFIRM)
     else:
         if step in ("make", "region"):
-            await show_selection(m, s)
-        elif step == "city":
-            s["letters"] = sorted({p[1][0].upper() for p in region_places(s["data"]["region_code"]) if p[1]})
-            s["step"] = "city_letter"
             await show_selection(m, s)
         else:
             await m.answer(prompt, reply_markup=CURRENCY if step == "currency" else menu)
@@ -298,7 +281,7 @@ async def publish(m: Message):
     if not m.from_user or m.chat.type != "private":
         return
     s = sessions.get(m.from_user.id)
-    if not s or s["step"] != "preview":
+    if not s or s["step"] != "preview" or len(s["data"].get("photos", [])) < 5:
         await m.answer("Немає готового оголошення. Натисни /start.")
         return
     s["step"] = "publishing"
@@ -312,7 +295,7 @@ async def publish(m: Message):
                 """INSERT INTO ads (user_id,username,category,title,description,price,city,contact,photo_id)
                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id""",
                 m.from_user.id, m.from_user.username, d["category"], d["title"],
-                description, f"{d['price']} {d['currency']}", d["city"], d["contact"], d["photo_id"]
+                description, f"{d['price']} {d['currency']}", d["city"], d["contact"], d["photos"][0][0]
             )
         target = GROUPS[d["category"]]
         try:
@@ -320,10 +303,11 @@ async def publish(m: Message):
                 "caption": render_ad(d, m.from_user.id, m.from_user.username, m.from_user.first_name, ad_id),
                 "parse_mode": "HTML",
             }
-            if d.get("photo_kind") == "document":
-                await bot.send_document(target, d["photo_id"], **post_kwargs)
-            else:
-                await bot.send_photo(target, d["photo_id"], **post_kwargs)
+            media = [InputMediaDocument(media=fid) if kind == "document" else InputMediaPhoto(media=fid)
+                     for fid, kind in d["photos"]]
+            media[0].caption = post_kwargs["caption"]
+            media[0].parse_mode = "HTML"
+            await bot.send_media_group(target, media=media)
             status = "✅ Оголошення опубліковано в групі!"
         except Exception:
             logging.exception("Failed to publish ad %s", ad_id)
@@ -371,21 +355,67 @@ async def wizard(m: Message):
         d["category"] = value
         await ask_next(m, s)
         return
-    if step in ("make", "model", "region", "city", "city_letter", "city_pick"):
+    if step in ("make", "model", "region"):
         await m.answer("👇 Обери варіант кнопкою в повідомленні вище.", reply_markup=menu)
+        return
+    if step == "custom_make":
+        if not value or len(value) > 70:
+            await m.answer("✍️ Введи назву марки (до 70 символів).")
+            return
+        d["make"] = value
+        s["step"] = "custom_model"
+        await m.answer("✍️ Введи назву моделі:")
+        return
+    if step == "custom_model":
+        if not value or len(value) > 80:
+            await m.answer("✍️ Введи модель (до 80 символів).")
+            return
+        d["model"] = value
+        d["title"] = d["make"] + " " + value
+        await ask_next(m, s)
         return
     if step == "photo":
         if m.photo:
-            d["photo_id"] = m.photo[-1].file_id
-            d["photo_kind"] = "photo"
+            photo = (m.photo[-1].file_id, "photo")
         elif m.document and (m.document.mime_type or "").startswith("image/"):
-            d["photo_id"] = m.document.file_id
-            d["photo_kind"] = "document"
+            photo = (m.document.file_id, "document")
         else:
-            await m.answer("📸 Надішли зображення як фото або файл-зображення (JPG/PNG). Фото обов'язкове.")
+            await m.answer("📸 Надішли фото (не менше 5).")
             return
-        d["photo"] = True  # Mark the required photo step as completed
+        photos = d.setdefault("photos", [])
+        if len(photos) < 10 and photo[0] not in {p[0] for p in photos}:
+            photos.append(photo)
+        if len(photos) < 5:
+            await m.answer(f"📸 Отримано {len(photos)} із мінімум 5 фото. Додай ще {5-len(photos)}.")
+            return
+        # If an album has more than five images, defer confirmation until the user
+        # finishes sending them, or until a separate confirmation message.
+        if m.media_group_id:
+            s["step"] = "photo_more"
+            await m.answer(f"📸 Отримано {len(photos)} фото. Можеш додати до 10. Натисни «✅ Фото готові», коли завершиш.",
+                           reply_markup=PHOTO_DONE)
+            return
+        d["photo"] = True
         await ask_next(m, s)
+        return
+    if step == "photo_more":
+        if m.photo or (m.document and (m.document.mime_type or "").startswith("image/")):
+            photo = (m.photo[-1].file_id, "photo") if m.photo else (m.document.file_id, "document")
+            photos = d.setdefault("photos", [])
+            if len(photos) < 10 and photo[0] not in {p[0] for p in photos}:
+                photos.append(photo)
+            if len(photos) == 10:
+                d["photo"] = True
+                await ask_next(m, s)
+            return
+        if value == "✅ Фото готові":
+            if len(d.get("photos", [])) < 5:
+                await m.answer("📸 Потрібно хоча б 5 фотографій.")
+                return
+            d["photo"] = True
+            await ask_next(m, s)
+            return
+        await m.answer("📸 Додай фото або натисни «✅ Фото готові».", reply_markup=PHOTO_DONE)
         return
     if step == "currency":
         if value not in ("🇺🇦 UAH (грн)", "🇺🇸 USD ($)"):
