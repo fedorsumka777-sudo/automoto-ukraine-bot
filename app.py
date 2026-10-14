@@ -331,7 +331,7 @@ async def show_ad_details(m, row, mine=False):
     controls = []
     if mine:
         controls.append([InlineKeyboardButton(text="✏️ Редагувати", callback_data=f"editad:{row['id']}")])
-    elif row["group_chat_id"] and row["group_message_id"]:
+    if row["group_chat_id"] and row["group_message_id"]:
         gid = str(row["group_chat_id"])
         if gid.startswith("-100"):
             controls.append([InlineKeyboardButton(text="🔗 Відкрити в групі",
