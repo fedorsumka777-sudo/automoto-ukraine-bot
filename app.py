@@ -251,6 +251,7 @@ async def wizard(m: Message):
         else:
             await m.answer("📸 Надішли зображення як фото або файл-зображення (JPG/PNG). Фото обов'язкове.")
             return
+        d["photo"] = True  # Mark the required photo step as completed
         await ask_next(m, s)
         return
     if step == "currency":
