@@ -14,11 +14,9 @@ DB_URL = os.environ["DATABASE_URL"]
 PUBLIC_URL = os.environ["PUBLIC_URL"].rstrip("/")
 SECRET = os.environ["WEBHOOK_SECRET"]
 GROUPS = {
-    "🚗 Авторинок": os.getenv("GROUP_AUTORINOK"),
-    "🚜 Агромаркет": os.getenv("GROUP_AGRO"),
-    "🔧 Запчастини": os.getenv("GROUP_PARTS"),
-    "🚛 Вантажівки": os.getenv("GROUP_TRUCKS"),
-    "🏍 Мототехніка": os.getenv("GROUP_MOTO"),
+    "🚗 Авторинок": os.getenv("GROUP_AUTORINOK", "@AutoMotoAvtorunok"),
+    "🚜 Агромаркет": os.getenv("GROUP_AGRO", "@AutoMotoAgromarket"),
+    "⚙️ Запчастини": os.getenv("GROUP_PARTS", "@AutoMotoZapchastunu"),
 }
 bot = Bot(TOKEN)
 dp = Dispatcher()
@@ -139,9 +137,9 @@ async def wizard(m: Message):
         if target:
             try:
                 if d.get("photo_id"):
-                    await bot.send_photo(int(target), d["photo_id"], caption=content[:1024])
+                    await bot.send_photo(target, d["photo_id"], caption=content[:1024])
                 else:
-                    await bot.send_message(int(target), content)
+                    await bot.send_message(target, content)
                 published = True
             except Exception:
                 logging.exception("Cannot publish ad %s", ad_id)
