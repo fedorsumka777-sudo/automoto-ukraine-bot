@@ -242,10 +242,15 @@ async def wizard(m: Message):
         await ask_next(m, s)
         return
     if step == "photo":
-        if not m.photo:
-            await m.answer("📸 Фото обов'язкове. Надішли одне фото товару.")
+        if m.photo:
+            d["photo_id"] = m.photo[-1].file_id
+            d["photo_kind"] = "photo"
+        elif m.document and (m.document.mime_type or "").startswith("image/"):
+            d["photo_id"] = m.document.file_id
+            d["photo_kind"] = "document"
+        else:
+            await m.answer("📸 Надішли зображення як фото або файл-зображення (JPG/PNG). Фото обов'язкове.")
             return
-        d["photo_id"] = m.photo[-1].file_id
         await ask_next(m, s)
         return
     if step == "currency":
