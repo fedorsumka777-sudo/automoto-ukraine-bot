@@ -36,14 +36,46 @@ categories = ReplyKeyboardMarkup(keyboard=[
 
 
 
+
+async def pin_bot_entry(chat_id):
+    me = await bot.get_me()
+    markup = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🚀 Створити оголошення", url=f"https://t.me/{me.username}?start=group")
+    ]])
+    notice = await bot.send_message(
+        chat_id,
+        "🇺🇦 АВТО МОТО УКРАЇНА\n"
+        "🚘 Безкоштовні оголошення про транспорт, сільгосптехніку та запчастини.\n"
+        "✍️ Можна публікувати самостійно або оформити оголошення через бота 👇",
+        reply_markup=markup,
+    )
+    try:
+        await bot.pin_chat_message(chat_id, notice.message_id, disable_notification=True)
+    except Exception:
+        logging.warning("Cannot pin bot entry in group %s; check admin pin permissions", chat_id)
+
+
+@dp.message(F.text.startswith("/pinbot"))
+async def pin_bot_command(m: Message):
+    if m.chat.type not in ("group", "supergroup") or not m.from_user:
+        return
+    member = await bot.get_chat_member(m.chat.id, m.from_user.id)
+    if member.status not in ("administrator", "creator"):
+        return
+    await pin_bot_entry(m.chat.id)
+
+
 @dp.message(F.new_chat_members)
 async def welcome_member(m: Message):
     if m.chat.type not in ("group", "supergroup"):
         return
+    me = await bot.get_me()
+    if any(u.id == me.id for u in m.new_chat_members):
+        await pin_bot_entry(m.chat.id)
+        return
     newcomers = [u for u in m.new_chat_members if not u.is_bot]
     if not newcomers:
         return
-    me = await bot.get_me()
     buttons = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="🚀 Створити оголошення через бота",
                              url=f"https://t.me/{me.username}?start=group")
@@ -383,6 +415,9 @@ async def wizard(m: Message):
             await m.answer("📸 Надішли фото (не менше 5).")
             return
         photos = d.setdefault("photos", [])
+        if photos and photo[1] != photos[0][1]:
+            await m.answer("📸 Надішли всі фотографії одним способом: як фото або як файли. Не змішуй формати.")
+            return
         if len(photos) < 10 and photo[0] not in {p[0] for p in photos}:
             photos.append(photo)
         if len(photos) < 5:
@@ -402,6 +437,9 @@ async def wizard(m: Message):
         if m.photo or (m.document and (m.document.mime_type or "").startswith("image/")):
             photo = (m.photo[-1].file_id, "photo") if m.photo else (m.document.file_id, "document")
             photos = d.setdefault("photos", [])
+            if photos and photo[1] != photos[0][1]:
+                await m.answer("📸 Не змішуй звичайні фото та файли в одному оголошенні.")
+                return
             if len(photos) < 10 and photo[0] not in {p[0] for p in photos}:
                 photos.append(photo)
             if len(photos) == 10:
