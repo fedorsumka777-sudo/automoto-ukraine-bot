@@ -608,7 +608,7 @@ async def publish(m: Message):
         else:
             results.append("⚠️ Канал ще не налаштований (CHANNEL_AUTOMOTO).")
 
-        status = "\\n".join(results)
+        status = "\n".join(results)
         sessions.pop(m.from_user.id, None)
         await m.answer(f"{status}\nНомер №{ad_id}", reply_markup=menu)
     except Exception:
