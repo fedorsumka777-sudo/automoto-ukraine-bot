@@ -8,7 +8,7 @@ import asyncpg
 from catalog import REGIONS, OTHER, keyboard, makes, models, matches, settlements, PLACES
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, Update, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, InputMediaPhoto, InputMediaDocument
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, Update, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, InputMediaPhoto, InputMediaDocument, BotCommand
 from fastapi import FastAPI, Request, HTTPException
 
 logging.basicConfig(level=logging.INFO)
@@ -195,6 +195,10 @@ WELCOME_TEXT = (
     "🔎 Шукай вигідні пропозиції.\n"
     "📸 Створюй оголошення з фотографіями за кілька хвилин.\n\n"
     "💚 Жодної плати за розміщення!\n\n"
+    "📢 НАШІ ГРУПИ:\n"
+    "🚗 Авторинок — https://t.me/AutoMotoAvtorunok\n"
+    "🚜 Агромаркет — https://t.me/AutoMotoAgromarket\n"
+    "⚙️ Запчастини — https://t.me/AutoMotoZapchastunu\n\n"
     "👇 Обирай потрібний розділ і починай!"
 )
 
@@ -213,6 +217,12 @@ async def start(m: Message):
     await send_welcome(m)
 
 
+@dp.message(F.text == "/help")
+async def help_command(m: Message):
+    if m.chat.type == "private":
+        await send_welcome(m)
+
+
 @dp.message(F.text == "❌ Скасувати")
 async def cancel(m: Message):
     if m.from_user:
@@ -228,21 +238,159 @@ async def new_ad(m: Message):
     await m.answer("🗂️ Обери категорію:", reply_markup=categories)
 
 
+
+def ad_buttons(rows, prefix):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"№{r['id']} — {r['title'][:32]} | {r['price']}",
+                              callback_data=f"{prefix}:{r['id']}")] for r in rows
+    ])
+
+
 @dp.message(F.text == "🔎 Пошук")
 async def search(m: Message):
-    if not m.from_user:
+    if not m.from_user or m.chat.type != "private":
         return
-    sessions[m.from_user.id] = {"step": "search", "data": {}}
-    await m.answer("🔎 Введи назву, марку або модель:", reply_markup=menu)
+    sessions[m.from_user.id] = {"step": "search_filter", "data": {}}
+    options = [[InlineKeyboardButton(text="🌐 Усі категорії", callback_data="filter:all")]]
+    options.extend([[InlineKeyboardButton(text=kind, callback_data=f"filter:{i}")]
+                    for i, kind in enumerate(GROUPS)])
+    await m.answer("🔎 Де шукатимемо оголошення? Обери категорію:",
+                   reply_markup=InlineKeyboardMarkup(inline_keyboard=options))
+
+
+@dp.callback_query(F.data.startswith("filter:"))
+async def choose_search_category(c: CallbackQuery):
+    s = sessions.get(c.from_user.id)
+    if not s or s["step"] != "search_filter":
+        await c.answer("Пошук уже завершено.")
+        return
+    index = c.data.split(":", 1)[1]
+    if index == "all":
+        s["data"]["category"] = None
+        selected = "усіх категоріях"
+    elif index.isdigit() and int(index) < len(GROUPS):
+        selected = list(GROUPS)[int(index)]
+        s["data"]["category"] = selected
+    else:
+        await c.answer("Неправильна категорія")
+        return
+    s["step"] = "search"
+    await c.message.edit_text(f"✅ Пошук у {selected}.")
+    await c.message.answer("🔎 Напиши будь-яке слово або кілька слів для пошуку.", reply_markup=menu)
+    await c.answer()
+
+
+def stored_ad_caption(r):
+    return (f"<b>{html.escape(r['category'].upper())}</b>\n"
+            f"<b>{html.escape(r['title'])}</b>\n"
+            f"📝 {html.escape(r['description'])}\n"
+            f"💰 <b>{html.escape(r['price'])}</b>\n"
+            f"📍 {html.escape(r['city'])}\n"
+            f"☎️ {html.escape(r['contact'])}\n🔖 №{r['id']}")
+
+
+@dp.callback_query(F.data.startswith("found:"))
+async def found_ad(c: CallbackQuery):
+    try:
+        ad_id = int(c.data.split(":")[1])
+    except (ValueError, IndexError):
+        await c.answer("Помилка")
+        return
+    async with db.acquire() as con:
+        row = await con.fetchrow("SELECT * FROM ads WHERE id=$1 AND status='active'", ad_id)
+    if not row:
+        await c.answer("Не знайдено", show_alert=True)
+        return
+    await c.answer()
+    await show_ad_details(c.message, row)
 
 
 @dp.message(F.text == "📋 Мої оголошення")
 async def mine(m: Message):
-    if not m.from_user:
+    if not m.from_user or m.chat.type != "private":
         return
     async with db.acquire() as con:
-        rows = await con.fetch("SELECT id,title,price,city FROM ads WHERE user_id=$1 ORDER BY id DESC LIMIT 10", m.from_user.id)
-    await m.answer("\n\n".join(f"№{r['id']} — {r['title']}, {r['price']}, {r['city']}" for r in rows) or "Оголошень немає.", reply_markup=menu)
+        rows = await con.fetch(
+            "SELECT id,title,price,city FROM ads WHERE user_id=$1 ORDER BY id DESC LIMIT 30",
+            m.from_user.id)
+    if not rows:
+        await m.answer("Поки немає оголошень.", reply_markup=menu)
+    else:
+        await m.answer("📋 Натисни на своє оголошення, щоб переглянути або відредагувати:",
+                       reply_markup=ad_buttons(rows, "myad"))
+
+
+async def show_ad_details(m, row, mine=False):
+    title = html.escape(row["title"])
+    category = html.escape(row["category"])
+    desc = html.escape(row["description"])
+    price = html.escape(row["price"])
+    city = html.escape(row["city"])
+    contact = html.escape(row["contact"])
+    content = f"<b>{category}</b>\n<b>{title}</b>\n\n📝 {desc}\n💰 {price}\n📍 {city}\n☎️ {contact}\n🔖 №{row['id']}"
+    controls = []
+    if mine:
+        controls.append([InlineKeyboardButton(text="✏️ Редагувати", callback_data=f"editad:{row['id']}")])
+    elif row["group_chat_id"] and row["group_message_id"]:
+        gid = str(row["group_chat_id"])
+        if gid.startswith("-100"):
+            controls.append([InlineKeyboardButton(text="🔗 Відкрити в групі",
+                url=f"https://t.me/c/{gid[4:]}/{row['group_message_id']}")])
+    await m.answer(content, parse_mode="HTML",
+                   reply_markup=InlineKeyboardMarkup(inline_keyboard=controls) if controls else menu)
+
+
+@dp.callback_query(F.data.startswith("myad:"))
+async def open_my_ad(c: CallbackQuery):
+    try:
+        ad_id = int(c.data.split(":")[1])
+    except (ValueError, IndexError):
+        await c.answer("Некоректний номер")
+        return
+    async with db.acquire() as con:
+        row = await con.fetchrow("SELECT * FROM ads WHERE id=$1 AND user_id=$2", ad_id, c.from_user.id)
+    if not row:
+        await c.answer("Оголошення не знайдено", show_alert=True)
+        return
+    await c.answer()
+    await show_ad_details(c.message, row, mine=True)
+
+
+@dp.callback_query(F.data.startswith("editad:"))
+async def edit_ad(c: CallbackQuery):
+    try:
+        ad_id = int(c.data.split(":")[1])
+    except (ValueError, IndexError):
+        await c.answer("Некоректний номер")
+        return
+    async with db.acquire() as con:
+        row = await con.fetchrow("SELECT id FROM ads WHERE id=$1 AND user_id=$2", ad_id, c.from_user.id)
+    if not row:
+        await c.answer("Немає доступу до цього оголошення", show_alert=True)
+        return
+    sessions[c.from_user.id] = {"step": "edit_choose", "data": {"ad_id": ad_id}}
+    fields = [("🏷️ Назва", "title"), ("📝 Опис", "description"),
+              ("💰 Ціна", "price"), ("📍 Місто", "city"), ("☎️ Контакт", "contact")]
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=label, callback_data=f"editfield:{field}")] for label, field in fields
+    ])
+    await c.message.answer("✏️ Що потрібно змінити?", reply_markup=markup)
+    await c.answer()
+
+
+@dp.callback_query(F.data.startswith("editfield:"))
+async def choose_edit_field(c: CallbackQuery):
+    s = sessions.get(c.from_user.id)
+    field = c.data.split(":", 1)[1]
+    allowed = ("title", "description", "price", "city", "contact")
+    if not s or s["step"] != "edit_choose" or field not in allowed:
+        await c.answer("Редагування неактуальне")
+        return
+    s["step"] = "edit_value"
+    s["data"]["field"] = field
+    await c.message.answer("✍️ Надішли нове значення для поля «" + field + "»:", reply_markup=menu)
+    await c.answer()
+
 
 
 EXTRAS = {
@@ -365,7 +513,10 @@ async def publish(m: Message):
                      for fid, kind in d["photos"]]
             media[0].caption = post_kwargs["caption"]
             media[0].parse_mode = "HTML"
-            await bot.send_media_group(target, media=media)
+            posted = await bot.send_media_group(target, media=media)
+            async with db.acquire() as con:
+                await con.execute("UPDATE ads SET group_chat_id=$1,group_message_id=$2 WHERE id=$3",
+                                  posted[0].chat.id, posted[0].message_id, ad_id)
             status = "✅ Оголошення опубліковано в групі!"
         except Exception:
             logging.exception("Failed to publish ad %s", ad_id)
@@ -394,17 +545,58 @@ async def wizard(m: Message):
     if step == "preview":
         await m.answer("Обери «✅ Опублікувати» або «✏️ Почати заново».", reply_markup=CONFIRM)
         return
+    if step == "search_filter":
+        await m.answer("👇 Обери категорію кнопкою вище.")
+        return
+    if step == "edit_choose":
+        await m.answer("👇 Обери поле кнопкою вище.")
+        return
+    if step == "edit_value":
+        field, ad_id = d["field"], d["ad_id"]
+        if not value or len(value) > (500 if field == "description" else 120):
+            await m.answer("Введи непорожнє значення (опис до 500 символів).")
+            return
+        async with db.acquire() as con:
+            row = await con.fetchrow(
+                "UPDATE ads SET " + field + "=$1 WHERE id=$2 AND user_id=$3 RETURNING *",
+                value, ad_id, m.from_user.id)
+        sessions.pop(m.from_user.id, None)
+        if row:
+            warning = ""
+            if row["group_chat_id"] and row["group_message_id"]:
+                try:
+                    await bot.edit_message_caption(
+                        chat_id=row["group_chat_id"], message_id=row["group_message_id"],
+                        caption=stored_ad_caption(row), parse_mode="HTML")
+                except Exception:
+                    logging.exception("Could not synchronize edit to group")
+                    warning = "\n⚠️ Зміна в базі збережена, але в групі оновити текст не вдалося."
+            else:
+                warning = "\nℹ️ Для старого оголошення немає збереженого ID повідомлення в групі. Відредагована картка доступна в боті."
+            await m.answer("✅ Зміни збережені." + warning, reply_markup=menu)
+            await show_ad_details(m, row, mine=True)
+        else:
+            await m.answer("Оголошення більше не знайдено.", reply_markup=menu)
+        return
     if step == "search":
         if len(value) < 2 or len(value) > 100:
             await m.answer("Введи від 2 до 100 символів.")
             return
+        pattern = "%" + value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        category = d.get("category")
         async with db.acquire() as con:
             rows = await con.fetch(
-                "SELECT id,category,title,price,city FROM ads WHERE status='active' AND (title ILIKE $1 OR description ILIKE $1) ORDER BY id DESC LIMIT 10",
-                "%" + value.replace("%", r"\%").replace("_", r"\_") + "%"
-            )
+                """SELECT id,category,title,price,city FROM ads
+                WHERE status='active' AND ($1::text IS NULL OR category=$1)
+                AND (title ILIKE $2 ESCAPE '\\' OR description ILIKE $2 ESCAPE '\\'
+                     OR city ILIKE $2 ESCAPE '\\')
+                ORDER BY id DESC LIMIT 30""", category, pattern)
         sessions.pop(m.from_user.id, None)
-        await m.answer("\n\n".join(f"№{r['id']} {r['category']}\n{r['title']}\n💰 {r['price']} 📍 {r['city']}" for r in rows) or "Нічого не знайдено.", reply_markup=menu)
+        if rows:
+            await m.answer(f"🔎 Знайдено {len(rows)} оголошень. Обери потрібне:",
+                           reply_markup=ad_buttons(rows, "found"))
+        else:
+            await m.answer("За запитом нічого не знайдено.", reply_markup=menu)
         return
     if step == "category":
         if value not in GROUPS:
@@ -513,6 +705,10 @@ async def lifespan(app: FastAPI):
             created_at TIMESTAMPTZ NOT NULL DEFAULT now()
         )""")
         await con.execute("CREATE INDEX IF NOT EXISTS ads_user_idx ON ads(user_id)")
+        await con.execute("ALTER TABLE ads ADD COLUMN IF NOT EXISTS group_chat_id BIGINT")
+        await con.execute("ALTER TABLE ads ADD COLUMN IF NOT EXISTS group_message_id BIGINT")
+    await bot.set_my_commands([BotCommand(command="start", description="🚀 Головне меню"),
+                               BotCommand(command="help", description="ℹ️ Як користуватися ботом")])
     await bot.set_webhook(PUBLIC_URL + "/telegram", secret_token=SECRET)
     yield
     # Do not delete webhook on shutdown: Render replaces instances during deploys.
