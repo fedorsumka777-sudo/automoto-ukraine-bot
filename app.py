@@ -2,6 +2,9 @@ import os
 import logging
 import html
 import re
+import json
+import asyncio
+import urllib.request
 from contextlib import asynccontextmanager
 
 import asyncpg
@@ -17,6 +20,8 @@ DB_URL = os.environ["DATABASE_URL"]
 PUBLIC_URL = os.environ["PUBLIC_URL"].rstrip("/")
 SECRET = os.environ["WEBHOOK_SECRET"]
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+AI_MODEL = os.getenv("AI_MODEL", "gpt-4o-mini")
 CHANNEL_AUTOMOTO = os.getenv("CHANNEL_AUTOMOTO", "").strip()
 GROUPS = {
     "🚗 Авторинок": os.getenv("GROUP_AUTORINOK", "@AutoMotoAvtorunok"),
@@ -479,6 +484,16 @@ CURRENCY = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="❌ Скасувати")],
 ], resize_keyboard=True)
 PHOTO_DONE = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="✅ Фото готові")], [KeyboardButton(text="❌ Скасувати")]], resize_keyboard=True)
+AI_CHOICE = ReplyKeyboardMarkup(keyboard=[
+    [KeyboardButton(text="✨ Покращити опис з Луною")],
+    [KeyboardButton(text="➡️ Залишити мій опис")],
+    [KeyboardButton(text="❌ Скасувати")],
+], resize_keyboard=True)
+AI_CONFIRM = ReplyKeyboardMarkup(keyboard=[
+    [KeyboardButton(text="✅ Використати опис Луни")],
+    [KeyboardButton(text="🔄 Спробувати ще раз"), KeyboardButton(text="➡️ Залишити мій опис")],
+    [KeyboardButton(text="❌ Скасувати")],
+], resize_keyboard=True)
 CONFIRM = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="✅ Опублікувати"), KeyboardButton(text="✏️ Почати заново")],
     [KeyboardButton(text="❌ Скасувати")],
@@ -490,6 +505,7 @@ def next_question(d):
         *(([("make", "🚘 Обери марку зі списку:")]) if d["category"] != "⚙️ Запчастини" else [("title", "🏷️ Назва запчастини?")]),
         *EXTRAS[d["category"]],
         ("description", "📝 Коротко опиши стан і особливості товару:"),
+        ("ai_done", "✨ Бажаєш покращити опис за допомогою AI Луни?"),
         ("price", "💰 Вкажи ціну тільки цифрами (наприклад 8500):"),
         ("currency", "💵 Обери валюту:"),
         ("region", "📍 Обери область України:"),
@@ -525,6 +541,65 @@ def render_ad(d, user_id, username, first_name, ad_id=None):
     return "\n".join(lines)
 
 
+
+def request_luna(data):
+    """Synchronous call executed in a worker thread; no API key or prompt logging."""
+    context = {
+        "category": data.get("category"), "make": data.get("make"),
+        "model": data.get("model"), "title": data.get("title"),
+        "year": data.get("year"), "spec": data.get("spec"),
+        "seller_description": data.get("description"),
+    }
+    payload = {
+        "model": AI_MODEL,
+        "max_tokens": 260,
+        "temperature": 0.45,
+        "messages": [
+            {"role": "system", "content":
+                "Ти Луна, українська помічниця для приватних оголошень про транспорт і техніку. "
+                "Створи лише один лаконічний, живий, грамотний опис українською (до 400 символів). "
+                "Спирайся ЛИШЕ на факти, які надав продавець. "
+                "Не вигадуй технічний стан, комплектацію, пробіг, документи, ремонт, переваги, гарантії, ДТП або історію. "
+                "Не додавай ціну, контакти, населений пункт, заголовок, хештеги чи зайвих емодзі. "
+                "Якщо мало інформації, просто лаконічно перефразуй її."},
+            {"role": "user", "content": json.dumps(context, ensure_ascii=False)}
+        ],
+    }
+    req = urllib.request.Request(
+        "https://api.openai.com/v1/chat/completions",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Authorization": "Bearer " + OPENAI_API_KEY,
+                 "Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as response:
+        body = json.load(response)
+    return body["choices"][0]["message"]["content"].strip()[:400]
+
+
+async def propose_luna(m, s):
+    if not OPENAI_API_KEY:
+        await m.answer("⚠️ Луна ще не підключена до API. Залишимо твій опис.")
+        s["data"]["ai_done"] = True
+        await ask_next(m, s)
+        return
+    await m.answer("✨ Луна готує варіант опису на основі твоїх даних...")
+    try:
+        suggestion = await asyncio.wait_for(asyncio.to_thread(request_luna, dict(s["data"])), timeout=35)
+        if not suggestion:
+            raise ValueError("Empty AI description")
+    except Exception:
+        logging.exception("Luna request failed")
+        await m.answer("⚠️ Зараз Луна недоступна. Твій опис збережено, продовжуємо без AI.")
+        s["data"]["ai_done"] = True
+        await ask_next(m, s)
+        return
+    s["data"]["ai_suggestion"] = suggestion
+    s["step"] = "ai_review"
+    await m.answer("✨ Луна пропонує:\n\n" + suggestion +
+                   "\n\nПеревір факти перед публікацією.", reply_markup=AI_CONFIRM)
+
+
 async def ask_next(m, s, user=None):
     user = user or m.from_user
     step, prompt = next_question(s["data"])
@@ -538,7 +613,8 @@ async def ask_next(m, s, user=None):
         if step in ("make", "region"):
             await show_selection(m, s)
         else:
-            await m.answer(prompt, reply_markup=CURRENCY if step == "currency" else menu)
+            reply = AI_CHOICE if step == "ai_done" else CURRENCY if step == "currency" else menu
+            await m.answer(prompt, reply_markup=reply)
 
 
 @dp.message(F.text == "✏️ Почати заново")
@@ -632,6 +708,32 @@ async def wizard(m: Message):
         return
     if step == "preview":
         await m.answer("Обери «✅ Опублікувати» або «✏️ Почати заново».", reply_markup=CONFIRM)
+        return
+    if step == "ai_done":
+        if value == "✨ Покращити опис з Луною":
+            await propose_luna(m, s)
+            return
+        if value == "➡️ Залишити мій опис":
+            d["ai_done"] = True
+            await ask_next(m, s)
+            return
+        await m.answer("Обери «✨ Покращити» або «➡️ Залишити мій опис».", reply_markup=AI_CHOICE)
+        return
+    if step == "ai_review":
+        if value == "✅ Використати опис Луни":
+            d["description"] = d.pop("ai_suggestion", d["description"])
+            d["ai_done"] = True
+            await ask_next(m, s)
+            return
+        if value == "🔄 Спробувати ще раз":
+            await propose_luna(m, s)
+            return
+        if value == "➡️ Залишити мій опис":
+            d.pop("ai_suggestion", None)
+            d["ai_done"] = True
+            await ask_next(m, s)
+            return
+        await m.answer("Обери одну з кнопок під варіантом Луни.", reply_markup=AI_CONFIRM)
         return
     if step == "search_filter":
         await m.answer("👇 Обери категорію кнопкою вище.")
