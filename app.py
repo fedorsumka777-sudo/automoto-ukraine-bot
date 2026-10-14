@@ -163,7 +163,7 @@ async def lifespan(app: FastAPI):
         await con.execute("CREATE INDEX IF NOT EXISTS ads_user_idx ON ads(user_id)")
     await bot.set_webhook(PUBLIC_URL + "/telegram", secret_token=SECRET)
     yield
-    await bot.delete_webhook()
+    # Do not delete webhook on shutdown: Render replaces instances during deploys.
     await bot.session.close()
     await db.close()
 
