@@ -306,8 +306,9 @@ async def cancel(m: Message):
 async def new_ad(m: Message):
     if not m.from_user:
         return
-    sessions[m.from_user.id] = {"step": "category", "data": {}}
-    await m.answer("🗂️ Обери категорію:", reply_markup=categories)
+    sessions[m.from_user.id] = {"step": "create_mode", "data": {}}
+    await m.answer("🚘 Як створимо оголошення?\n\n📝 Покроково — відповідай на запитання.\n🤖 З Луною — опиши все одним повідомленням.",
+                   reply_markup=CREATE_MODE)
 
 
 
@@ -484,6 +485,11 @@ CURRENCY = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="❌ Скасувати")],
 ], resize_keyboard=True)
 PHOTO_DONE = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="✅ Фото готові")], [KeyboardButton(text="❌ Скасувати")]], resize_keyboard=True)
+CREATE_MODE = ReplyKeyboardMarkup(keyboard=[
+    [KeyboardButton(text="📝 Покрокове створення")],
+    [KeyboardButton(text="🤖 Описати все Луні")],
+    [KeyboardButton(text="❌ Скасувати")],
+], resize_keyboard=True)
 AI_CHOICE = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="✨ Покращити опис з Луною")],
     [KeyboardButton(text="➡️ Залишити мій опис")],
@@ -540,6 +546,87 @@ def render_ad(d, user_id, username, first_name, ad_id=None):
         lines.append(f"🔖 Оголошення №{ad_id}")
     return "\n".join(lines)
 
+
+
+
+def parse_luna_listing(raw):
+    """Extract only information explicitly supplied by the seller."""
+    schema = {
+        "model": AI_MODEL, "temperature": 0.1, "max_tokens": 650,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role":"system","content":
+                "Витягни дані з неструктурованого тексту продавця українською. "
+                "Поверни ТІЛЬКИ JSON з полями category,title,make,model,year,spec,description,"
+                "price,currency,region,city,contact. Категорія точно одна з "
+                "'🚗 Авторинок', '🚜 Агромаркет', '⚙️ Запчастини' або порожня. "
+                "year, spec - дослівні характеристики (для авторинку spec = пробіг у км; "
+                "для агро spec = тип і стан; для запчастин year = сумісність, spec = стан). "
+                "price — тільки число без символу валюти, currency тільки 'грн' або 'USD'. "
+                "region — лише коли прямо названа область; city — лише коли прямо названий населений пункт. "
+                "description — короткий природний опис лише за відомими фактами, до 280 символів. "
+                "НЕ вигадуй відсутніх даних, не виводь припущень про стан, пробіг, документи тощо. "
+                "Невідомі поля — порожній рядок."},
+            {"role":"user","content":raw[:2200]},
+        ]
+    }
+    req = urllib.request.Request(
+        "https://api.openai.com/v1/chat/completions",
+        data=json.dumps(schema,ensure_ascii=False).encode("utf-8"),
+        headers={"Authorization":"Bearer "+OPENAI_API_KEY,"Content-Type":"application/json"},
+        method="POST")
+    with urllib.request.urlopen(req,timeout=35) as response:
+        parsed = json.load(response)
+    obj = json.loads(parsed["choices"][0]["message"]["content"])
+    if not isinstance(obj,dict):
+        raise ValueError("Invalid listing")
+    out = {k:str(obj.get(k) or "").strip() for k in (
+        "category","title","make","model","year","spec","description",
+        "price","currency","region","city","contact")}
+    if out["category"] not in GROUPS:
+        out["category"] = ""
+    if out["region"] not in REGIONS:
+        out["region"] = ""
+    if out["currency"] not in ("грн","USD"):
+        out["currency"] = ""
+    if not re.fullmatch(r"\\d{1,10}(?:[.,]\\d{1,2})?",out["price"]):
+        out["price"] = ""
+    return out
+
+
+async def fill_from_luna(m,s):
+    if not OPENAI_API_KEY:
+        await m.answer("⚠️ AI-ключ не налаштований. Перейдемо до покрокового створення.",reply_markup=menu)
+        s["step"]="category"
+        await m.answer("🗂️ Обери категорію:",reply_markup=categories)
+        return
+    await m.answer("🤖 Луна аналізує твій опис...")
+    try:
+        extracted = await asyncio.wait_for(asyncio.to_thread(parse_luna_listing,s["raw"]),timeout=40)
+    except Exception:
+        logging.exception("Luna extraction failed")
+        await m.answer("⚠️ Луна зараз недоступна. Обери категорію і продовжимо вручну.")
+        s["step"]="category"
+        await m.answer("🗂️ Обери категорію:",reply_markup=categories)
+        return
+    d=s["data"]
+    d.update({k:v for k,v in extracted.items() if v})
+    d["ai_done"]=True
+    if d.get("make") and d.get("model") and not d.get("title"):
+        d["title"]=d["make"]+" "+d["model"]
+    if d.get("region"):
+        d["region_code"]=REGIONS[d["region"]]
+    # Do not put a synthesized title in place of a missing vehicle make/model.
+    if d.get("category") != "⚙️ Запчастини" and (not d.get("make") or not d.get("model")):
+        d.pop("title",None)
+    preview = "\\n".join(f"• {k}: {v}" for k,v in extracted.items() if v and k not in ("make","model"))
+    await m.answer("✅ Луна розібрала текст:\n"+(preview or "Потрібні уточнення.")+
+                   "\n\nЗараз запитаю лише те, чого бракує.",reply_markup=menu)
+    if not d.get("category"):
+        s["step"]="category"
+        await m.answer("🗂️ Обери категорію:",reply_markup=categories)
+    else:
+        await ask_next(m,s)
 
 
 def request_luna(data):
@@ -708,6 +795,29 @@ async def wizard(m: Message):
         return
     if step == "preview":
         await m.answer("Обери «✅ Опублікувати» або «✏️ Почати заново».", reply_markup=CONFIRM)
+        return
+    if step == "create_mode":
+        if value == "📝 Покрокове створення":
+            s["step"]="category"
+            await m.answer("🗂️ Обери категорію:",reply_markup=categories)
+        elif value == "🤖 Описати все Луні":
+            s["step"]="luna_raw"
+            await m.answer("🤖 Напиши все одним текстом: що продаєш, марка/модель, рік, "
+                           "стан, пробіг, ціна, місто та контакт. Можна писати як зручно.",
+                           reply_markup=menu)
+        else:
+            await m.answer("Обери спосіб створення кнопкою.",reply_markup=CREATE_MODE)
+        return
+    if step == "luna_raw":
+        if len(value) < 15 or len(value)>2200:
+            await m.answer("Опиши товар трохи докладніше (15–2200 символів).")
+            return
+        s["raw"]=value
+        s["step"]="luna_processing"
+        await fill_from_luna(m,s)
+        return
+    if step == "luna_processing":
+        await m.answer("🤖 Луна ще опрацьовує опис.")
         return
     if step == "ai_done":
         if value == "✨ Покращити опис з Луною":
