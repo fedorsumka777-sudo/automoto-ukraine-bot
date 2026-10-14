@@ -11,7 +11,6 @@ from fastapi import FastAPI, Request, HTTPException
 
 logging.basicConfig(level=logging.INFO)
 TOKEN = os.environ["BOT_TOKEN"]
-DB_URL = os.environ["DATABASE_URL"]
 PUBLIC_URL = os.environ["PUBLIC_URL"].rstrip("/")
 SECRET = os.environ["WEBHOOK_SECRET"]
 GROUPS = {
