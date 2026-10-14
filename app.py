@@ -54,7 +54,7 @@ async def new_ad(m: Message):
     if not m.from_user:
         return
     sessions[m.from_user.id] = {"step": "category", "data": {}}
-    await m.answer("Обери категорію:", reply_markup=categories)
+    await m.answer("🗂️ Обери категорію:", reply_markup=categories)
 
 
 @dp.message(F.text == "🔎 Пошук")
@@ -62,7 +62,7 @@ async def search(m: Message):
     if not m.from_user:
         return
     sessions[m.from_user.id] = {"step": "search", "data": {}}
-    await m.answer("Введи назву, марку або модель:", reply_markup=menu)
+    await m.answer("🔎 Введи назву, марку або модель:", reply_markup=menu)
 
 
 @dp.message(F.text == "📋 Мої оголошення")
@@ -76,16 +76,16 @@ async def mine(m: Message):
 
 EXTRAS = {
     "🚗 Авторинок": [
-        ("year", "Рік випуску? (наприклад 2012)"),
-        ("spec", "Пробіг у км? (наприклад 185000)"),
+        ("year", "📅 Рік випуску? (наприклад 2012)"),
+        ("spec", "🛣️ Пробіг у км? (наприклад 185000)"),
     ],
     "🚜 Агромаркет": [
-        ("year", "Рік випуску техніки?"),
-        ("spec", "Тип і стан техніки? (наприклад трактор, справний)"),
+        ("year", "📅 Рік випуску техніки?"),
+        ("spec", "🚜 Тип і стан техніки? (наприклад трактор, справний)"),
     ],
     "⚙️ Запчастини": [
-        ("year", "Для якої техніки / моделі підходить?"),
-        ("spec", "Стан: нова чи б/в?"),
+        ("year", "🔧 Для якої техніки / моделі підходить?"),
+        ("spec", "📦 Стан: нова чи б/в?"),
     ],
 }
 CURRENCY = ReplyKeyboardMarkup(keyboard=[
@@ -100,12 +100,12 @@ CONFIRM = ReplyKeyboardMarkup(keyboard=[
 
 def next_question(d):
     fields = [
-        ("title", "Марка, модель або назва товару?"),
+        ("title", "🏷️ Марка, модель або назва товару?"),
         *EXTRAS[d["category"]],
-        ("description", "Коротко опиши стан і особливості товару:"),
-        ("price", "Вкажи ціну тільки цифрами (наприклад 8500):"),
-        ("currency", "Обери валюту:"),
-        ("city", "Місто або область?"),
+        ("description", "📝 Коротко опиши стан і особливості товару:"),
+        ("price", "💰 Вкажи ціну тільки цифрами (наприклад 8500):"),
+        ("currency", "💵 Обери валюту:"),
+        ("city", "📍 Місто або область?"),
         ("contact", "Телефон або Telegram для зв'язку?"),
         ("photo", "📸 Надішли фотографію товару. Без фото оголошення не опублікується."),
     ]
@@ -141,12 +141,15 @@ async def ask_next(m, s):
     step, prompt = next_question(s["data"])
     s["step"] = step
     if step == "preview":
-        await m.answer_photo(
-            s["data"]["photo_id"],
-            caption=render_ad(s["data"], m.from_user.id, m.from_user.username, m.from_user.first_name),
-            parse_mode="HTML",
-            reply_markup=CONFIRM,
-        )
+        preview_kwargs = {
+            "caption": render_ad(s["data"], m.from_user.id, m.from_user.username, m.from_user.first_name),
+            "parse_mode": "HTML",
+            "reply_markup": CONFIRM,
+        }
+        if s["data"].get("photo_kind") == "document":
+            await m.answer_document(s["data"]["photo_id"], **preview_kwargs)
+        else:
+            await m.answer_photo(s["data"]["photo_id"], **preview_kwargs)
         await m.answer("Перевір оголошення. Опублікувати чи почати заново?", reply_markup=CONFIRM)
     else:
         await m.answer(prompt, reply_markup=CURRENCY if step == "currency" else menu)
@@ -183,11 +186,14 @@ async def publish(m: Message):
             )
         target = GROUPS[d["category"]]
         try:
-            await bot.send_photo(
-                target, d["photo_id"],
-                caption=render_ad(d, m.from_user.id, m.from_user.username, m.from_user.first_name, ad_id),
-                parse_mode="HTML"
-            )
+            post_kwargs = {
+                "caption": render_ad(d, m.from_user.id, m.from_user.username, m.from_user.first_name, ad_id),
+                "parse_mode": "HTML",
+            }
+            if d.get("photo_kind") == "document":
+                await bot.send_document(target, d["photo_id"], **post_kwargs)
+            else:
+                await bot.send_photo(target, d["photo_id"], **post_kwargs)
             status = "✅ Оголошення опубліковано в групі!"
         except Exception:
             logging.exception("Failed to publish ad %s", ad_id)
