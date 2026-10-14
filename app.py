@@ -307,7 +307,7 @@ async def new_ad(m: Message):
     if not m.from_user:
         return
     sessions[m.from_user.id] = {"step": "create_mode", "data": {}}
-    await m.answer("🚘 Як створимо оголошення?\n\n📝 Покроково — відповідай на запитання.\n🤖 З Луною — опиши все одним повідомленням.",
+    await m.answer("🚘 Як створимо оголошення?\n\n📝 Покроково — відповідай на запитання.\n🤖 Штучний інтелект — введи довільний опис одним повідомленням.",
                    reply_markup=CREATE_MODE)
 
 
@@ -487,7 +487,7 @@ CURRENCY = ReplyKeyboardMarkup(keyboard=[
 PHOTO_DONE = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="✅ Фото готові")], [KeyboardButton(text="❌ Скасувати")]], resize_keyboard=True)
 CREATE_MODE = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="📝 Покрокове створення")],
-    [KeyboardButton(text="🤖 Описати все Луні")],
+    [KeyboardButton(text="🤖 Створити за допомогою штучного інтелекту")],
     [KeyboardButton(text="❌ Скасувати")],
 ], resize_keyboard=True)
 AI_CHOICE = ReplyKeyboardMarkup(keyboard=[
@@ -511,7 +511,6 @@ def next_question(d):
         *(([("make", "🚘 Обери марку зі списку:")]) if d["category"] != "⚙️ Запчастини" else [("title", "🏷️ Назва запчастини?")]),
         *EXTRAS[d["category"]],
         ("description", "📝 Коротко опиши стан і особливості товару:"),
-        ("ai_done", "✨ Бажаєш покращити опис за допомогою AI Луни?"),
         ("price", "💰 Вкажи ціну тільки цифрами (наприклад 8500):"),
         ("currency", "💵 Обери валюту:"),
         ("region", "📍 Обери область України:"),
@@ -611,7 +610,6 @@ async def fill_from_luna(m,s):
         return
     d=s["data"]
     d.update({k:v for k,v in extracted.items() if v})
-    d["ai_done"]=True
     if d.get("make") and d.get("model") and not d.get("title"):
         d["title"]=d["make"]+" "+d["model"]
     if d.get("region"):
@@ -619,7 +617,9 @@ async def fill_from_luna(m,s):
     # Do not put a synthesized title in place of a missing vehicle make/model.
     if d.get("category") != "⚙️ Запчастини" and (not d.get("make") or not d.get("model")):
         d.pop("title",None)
-    preview = "\\n".join(f"• {k}: {v}" for k,v in extracted.items() if v and k not in ("make","model"))
+    if d.get("category") == "⚙️ Запчастини" and not d.get("title") and d.get("make"):
+        d["title"] = (d["make"] + " " + d.get("model", "")).strip()
+    preview = "\n".join(f"• {k}: {v}" for k,v in extracted.items() if v and k not in ("make","model"))
     await m.answer("✅ Луна розібрала текст:\n"+(preview or "Потрібні уточнення.")+
                    "\n\nЗараз запитаю лише те, чого бракує.",reply_markup=menu)
     if not d.get("category"):
@@ -924,54 +924,33 @@ async def wizard(m: Message):
         d["title"] = d["make"] + " " + value
         await ask_next(m, s)
         return
-    if step == "photo":
+    if step in ("photo", "photo_more"):
+        if value == "✅ Фото готові":
+            if len(d.get("photos", [])) < 5:
+                await m.answer(f"📸 Додано {len(d.get('photos', []))} фото. Потрібно мінімум 5.", reply_markup=PHOTO_DONE)
+                return
+            d["photo"] = True
+            await ask_next(m, s)
+            return
         if m.photo:
             photo = (m.photo[-1].file_id, "photo")
         elif m.document and (m.document.mime_type or "").startswith("image/"):
             photo = (m.document.file_id, "document")
         else:
-            await m.answer("📸 Надішли фото (не менше 5).")
+            await m.answer("📸 Надішли від 5 до 10 фото й натисни «✅ Фото готові».", reply_markup=PHOTO_DONE)
             return
         photos = d.setdefault("photos", [])
         if photos and photo[1] != photos[0][1]:
-            await m.answer("📸 Надішли всі фотографії одним способом: як фото або як файли. Не змішуй формати.")
+            await m.answer("📸 Не змішуй фото та документи. Надішли всі зображення одним способом.")
             return
         if len(photos) < 10 and photo[0] not in {p[0] for p in photos}:
             photos.append(photo)
-        if len(photos) < 5:
-            await m.answer(f"📸 Отримано {len(photos)} із мінімум 5 фото. Додай ще {5-len(photos)}.")
-            return
-        # If an album has more than five images, defer confirmation until the user
-        # finishes sending them, or until a separate confirmation message.
-        if m.media_group_id:
-            s["step"] = "photo_more"
-            await m.answer(f"📸 Отримано {len(photos)} фото. Можеш додати до 10. Натисни «✅ Фото готові», коли завершиш.",
+        s["step"] = "photo_more"
+        # Telegram albums arrive in separate updates: never finalize early.
+        if not m.media_group_id or len(photos) == 10:
+            await m.answer(f"📸 Додано {len(photos)} фото з 5–10. "
+                           + ("✅ Можеш завершити." if len(photos)>=5 else f"Додай ще {5-len(photos)}."),
                            reply_markup=PHOTO_DONE)
-            return
-        d["photo"] = True
-        await ask_next(m, s)
-        return
-    if step == "photo_more":
-        if m.photo or (m.document and (m.document.mime_type or "").startswith("image/")):
-            photo = (m.photo[-1].file_id, "photo") if m.photo else (m.document.file_id, "document")
-            photos = d.setdefault("photos", [])
-            if photos and photo[1] != photos[0][1]:
-                await m.answer("📸 Не змішуй звичайні фото та файли в одному оголошенні.")
-                return
-            if len(photos) < 10 and photo[0] not in {p[0] for p in photos}:
-                photos.append(photo)
-            if len(photos) == 10:
-                d["photo"] = True
-                await ask_next(m, s)
-            return
-        if value == "✅ Фото готові":
-            if len(d.get("photos", [])) < 5:
-                await m.answer("📸 Потрібно хоча б 5 фотографій.")
-                return
-            d["photo"] = True
-            await ask_next(m, s)
-            return
-        await m.answer("📸 Додай фото або натисни «✅ Фото готові».", reply_markup=PHOTO_DONE)
         return
     if step == "currency":
         if value not in ("🇺🇦 UAH (грн)", "🇺🇸 USD ($)"):
