@@ -49,10 +49,7 @@ async def pin_bot_entry(chat_id):
         "✍️ Можна публікувати самостійно або оформити оголошення через бота 👇",
         reply_markup=markup,
     )
-    try:
-        await bot.pin_chat_message(chat_id, notice.message_id, disable_notification=True)
-    except Exception:
-        logging.warning("Cannot pin bot entry in group %s; check admin pin permissions", chat_id)
+    await bot.pin_chat_message(chat_id, notice.message_id, disable_notification=True)
 
 
 @dp.message(F.text.startswith("/pinbot"))
@@ -60,9 +57,14 @@ async def pin_bot_command(m: Message):
     if m.chat.type not in ("group", "supergroup") or not m.from_user:
         return
     member = await bot.get_chat_member(m.chat.id, m.from_user.id)
-    if member.status not in ("administrator", "creator"):
+    if str(member.status) not in ("administrator", "creator"):
         return
-    await pin_bot_entry(m.chat.id)
+    try:
+        await pin_bot_entry(m.chat.id)
+        await m.answer("✅ Повідомлення бота опубліковано. Перевір закріплені повідомлення.")
+    except Exception:
+        logging.exception("Unable to publish bot entry in group %s", m.chat.id)
+        await m.answer("⚠️ Не вдалося створити повідомлення. Перевір права бота й журнал Render.")
 
 
 @dp.message(F.new_chat_members)
@@ -148,7 +150,12 @@ async def select_callback(c: CallbackQuery):
         await c.answer()
         return
     if action == "custom" and s["step"] in ("make", "model"):
-        s["step"] = "custom_make" if s["step"] == "make" else "custom_model"
+        previous = s["step"]
+        s["step"] = "custom_make" if previous == "make" else "custom_model"
+        try:
+            await c.message.edit_text("✅ Обрано ручне введення марки" if previous == "make" else "✅ Обрано ручне введення моделі")
+        except Exception:
+            pass
         await c.message.answer("✍️ Введи назву марки:" if s["step"] == "custom_make" else "✍️ Введи модель:", reply_markup=menu)
         await c.answer()
         return
@@ -174,17 +181,36 @@ async def select_callback(c: CallbackQuery):
         await ask_next(c.message, s, c.from_user)
     await c.answer()
     try:
-        await c.message.edit_reply_markup(reply_markup=None)
+        await c.message.edit_text("✅ Обрано: " + chosen)
     except Exception:
         pass
+
+
+WELCOME_TEXT = (
+    "🇺🇦 ВІТАЄМО В АВТО МОТО УКРАЇНА! 🚘\n\n"
+    "Твій безкоштовний торговельний майданчик для автомобілів, "
+    "мотоциклів, сільгосптехніки та запчастин!\n\n"
+    "🔥 Продавай без посередників.\n"
+    "🤝 Знаходь покупців з усієї України.\n"
+    "🔎 Шукай вигідні пропозиції.\n"
+    "📸 Створюй оголошення з фотографіями за кілька хвилин.\n\n"
+    "💚 Жодної плати за розміщення!\n\n"
+    "👇 Обирай потрібний розділ і починай!"
+)
+
+
+async def send_welcome(m):
+    await m.answer(WELCOME_TEXT, reply_markup=menu)
 
 
 @dp.message(CommandStart())
 async def start(m: Message):
     if not m.from_user:
         return
+    if m.chat.type != "private":
+        return
     sessions.pop(m.from_user.id, None)
-    await m.answer("🇺🇦 АВТО МОТО УКРАЇНА\nБезкоштовні оголошення. Обери дію 👇", reply_markup=menu)
+    await send_welcome(m)
 
 
 @dp.message(F.text == "❌ Скасувати")
@@ -358,7 +384,7 @@ async def wizard(m: Message):
         return
     s = sessions.get(m.from_user.id)
     if not s:
-        await m.answer("Натисни /start для початку.", reply_markup=menu)
+        await send_welcome(m)
         return
     step, d = s["step"], s["data"]
     value = (m.text or "").strip()
