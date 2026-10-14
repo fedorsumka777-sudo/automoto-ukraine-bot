@@ -17,6 +17,7 @@ DB_URL = os.environ["DATABASE_URL"]
 PUBLIC_URL = os.environ["PUBLIC_URL"].rstrip("/")
 SECRET = os.environ["WEBHOOK_SECRET"]
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))
+CHANNEL_AUTOMOTO = os.getenv("CHANNEL_AUTOMOTO", "").strip()
 GROUPS = {
     "🚗 Авторинок": os.getenv("GROUP_AUTORINOK", "@AutoMotoAvtorunok"),
     "🚜 Агромаркет": os.getenv("GROUP_AGRO", "@AutoMotoAgromarket"),
@@ -570,23 +571,44 @@ async def publish(m: Message):
                 description, f"{d['price']} {d['currency']}", d["city"], d["contact"], d["photos"][0][0]
             )
         target = GROUPS[d["category"]]
+        caption = render_ad(d, m.from_user.id, m.from_user.username, m.from_user.first_name, ad_id)
+
+        def make_album():
+            # Telegram media objects cannot be reused across send requests.
+            items = [InputMediaDocument(media=fid) if kind == "document"
+                     else InputMediaPhoto(media=fid) for fid, kind in d["photos"]]
+            items[0].caption = caption
+            items[0].parse_mode = "HTML"
+            return items
+
+        results = []
         try:
-            post_kwargs = {
-                "caption": render_ad(d, m.from_user.id, m.from_user.username, m.from_user.first_name, ad_id),
-                "parse_mode": "HTML",
-            }
-            media = [InputMediaDocument(media=fid) if kind == "document" else InputMediaPhoto(media=fid)
-                     for fid, kind in d["photos"]]
-            media[0].caption = post_kwargs["caption"]
-            media[0].parse_mode = "HTML"
-            posted = await bot.send_media_group(target, media=media)
+            posted = await bot.send_media_group(target, media=make_album())
             async with db.acquire() as con:
-                await con.execute("UPDATE ads SET group_chat_id=$1,group_message_id=$2 WHERE id=$3",
-                                  posted[0].chat.id, posted[0].message_id, ad_id)
-            status = "✅ Оголошення опубліковано в групі!"
+                await con.execute(
+                    "UPDATE ads SET group_chat_id=$1,group_message_id=$2 WHERE id=$3",
+                    posted[0].chat.id, posted[0].message_id, ad_id)
+            results.append("✅ У вибраній групі опубліковано.")
         except Exception:
-            logging.exception("Failed to publish ad %s", ad_id)
-            status = "⚠️ Оголошення збережено, але публікація в групі не вдалася. Повідом адміністратора."
+            logging.exception("Group publishing failed for ad %s", ad_id)
+            results.append("⚠️ Не вдалося опублікувати у групі.")
+
+        if CHANNEL_AUTOMOTO:
+            try:
+                # Channel publishing is independent of the selected group.
+                channel_posted = await bot.send_media_group(CHANNEL_AUTOMOTO, media=make_album())
+                async with db.acquire() as con:
+                    await con.execute(
+                        "UPDATE ads SET channel_chat_id=$1,channel_message_id=$2 WHERE id=$3",
+                        channel_posted[0].chat.id, channel_posted[0].message_id, ad_id)
+                results.append("✅ У спільному каналі опубліковано.")
+            except Exception:
+                logging.exception("Channel publishing failed for ad %s", ad_id)
+                results.append("⚠️ Не вдалося опублікувати в каналі. Перевір права бота.")
+        else:
+            results.append("⚠️ Канал ще не налаштований (CHANNEL_AUTOMOTO).")
+
+        status = "\\n".join(results)
         sessions.pop(m.from_user.id, None)
         await m.answer(f"{status}\nНомер №{ad_id}", reply_markup=menu)
     except Exception:
@@ -773,6 +795,8 @@ async def lifespan(app: FastAPI):
         await con.execute("CREATE INDEX IF NOT EXISTS ads_user_idx ON ads(user_id)")
         await con.execute("ALTER TABLE ads ADD COLUMN IF NOT EXISTS group_chat_id BIGINT")
         await con.execute("ALTER TABLE ads ADD COLUMN IF NOT EXISTS group_message_id BIGINT")
+        await con.execute("ALTER TABLE ads ADD COLUMN IF NOT EXISTS channel_chat_id BIGINT")
+        await con.execute("ALTER TABLE ads ADD COLUMN IF NOT EXISTS channel_message_id BIGINT")
         await con.execute("""CREATE TABLE IF NOT EXISTS bot_users(
             user_id BIGINT PRIMARY KEY, username TEXT, first_seen TIMESTAMPTZ DEFAULT now(),
             last_seen TIMESTAMPTZ DEFAULT now())""")
