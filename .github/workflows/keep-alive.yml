@@ -1,0 +1,25 @@
+name: Keep Render bot warm
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Ping Render health endpoint
+        env:
+          RENDER_URL: ${{ vars.RENDER_URL }}
+        run: |
+          if [ -z "$RENDER_URL" ]; then
+            echo "::warning::Configure repository variable RENDER_URL with your Render service URL."
+            exit 0
+          fi
+          URL="${RENDER_URL%/}/"
+          curl --fail --silent --show-error --location --max-time 90 --retry 2 "$URL"
