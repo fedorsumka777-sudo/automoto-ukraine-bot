@@ -129,13 +129,13 @@ async def select_callback(c: CallbackQuery):
     elif step == "model":
         d["model"] = chosen
         d["title"] = d["make"] + " " + chosen
-        await ask_next(c.message, s)
+        await ask_next(c.message, s, c.from_user)
     elif step == "region":
         d["region"] = chosen
         d["region_code"] = REGIONS[chosen]
         if chosen in ("Київ", "Севастополь"):
             d["city"] = chosen
-        await ask_next(c.message, s)
+        await ask_next(c.message, s, c.from_user)
     elif step == "city_letter":
         s["place_items"] = [p for p in region_places(d["region_code"]) if p[1].upper().startswith(chosen)]
         s["place_labels"] = [f"{p[1]} ({p[3]} р-н)" for p in s["place_items"]]
@@ -147,7 +147,7 @@ async def select_callback(c: CallbackQuery):
         d["katottg"] = p[4]
         for key in ("place_items", "place_labels", "letters"):
             s.pop(key, None)
-        await ask_next(c.message, s)
+        await ask_next(c.message, s, c.from_user)
     await c.answer()
     try:
         await c.message.edit_reply_markup(reply_markup=None)
@@ -259,12 +259,13 @@ def render_ad(d, user_id, username, first_name, ad_id=None):
     return "\n".join(lines)
 
 
-async def ask_next(m, s):
+async def ask_next(m, s, user=None):
+    user = user or m.from_user
     step, prompt = next_question(s["data"])
     s["step"] = step
     if step == "preview":
         preview_kwargs = {
-            "caption": render_ad(s["data"], m.from_user.id, m.from_user.username, m.from_user.first_name),
+            "caption": render_ad(s["data"], user.id, user.username, user.first_name),
             "parse_mode": "HTML",
             "reply_markup": CONFIRM,
         }
