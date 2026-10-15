@@ -138,55 +138,51 @@ async def remove_system_notice(m: Message):
 async def show_admin(m: Message):
     if m.chat.type != "private" or not m.from_user or not ADMIN_USER_ID or m.from_user.id != ADMIN_USER_ID:
         return
-    periods = [("Сьогодні", "date_trunc('day', now() AT TIME ZONE 'Europe/Kyiv') AT TIME ZONE 'Europe/Kyiv'"),
-               ("7 днів", "now() - interval '7 days'"),
-               ("30 днів", "now() - interval '30 days'")]
     async with db.acquire() as con:
         total = await con.fetchval("SELECT count(*) FROM bot_users")
-        ads_total = await con.fetchval("SELECT count(*) FROM ads")
-        all_cleanups = await con.fetchval("SELECT count(*) FROM system_cleanup")
-        lines = ["🛡 АДМІНКА | АВТО МОТО УКРАЇНА",
-                 f"👤 Усього користувачів бота: {total}",
-                 f"📋 Усього оголошень у базі: {ads_total}"]
-        for label, since in periods:
-            new_users = await con.fetchval(f"SELECT count(*) FROM bot_users WHERE first_seen >= {since}")
-            active = await con.fetchval(f"SELECT count(DISTINCT user_id) FROM bot_activity WHERE scope='private' AND created_at >= {since}")
-            actions = await con.fetch(f"""SELECT event,count(*) n FROM bot_activity
-                WHERE scope='private' AND created_at >= {since} GROUP BY event ORDER BY n DESC LIMIT 5""")
-            posts = await con.fetchval(f"SELECT count(*) FROM ads WHERE created_at >= {since}")
-            ai = await con.fetch(f"""SELECT kind,count(*) requests,coalesce(sum(input_tokens),0) inp,
-                coalesce(sum(output_tokens),0) outp,coalesce(sum(estimated_usd),0) usd
-                FROM ai_usage WHERE created_at >= {since} GROUP BY kind ORDER BY kind""")
-            cleaned = await con.fetchval(f"SELECT count(*) FROM system_cleanup WHERE created_at >= {since}")
-            lines += ["", f"📊 {label}:",
-                      f"👤 Нові: {new_users} | Активні: {active} | Оголошення: {posts}",
-                      "💬 Дії: " + (", ".join(f"{x['event']} — {x['n']}" for x in actions) if actions else "немає"),
-                      f"🧹 Очищено службових: {cleaned}"]
-            if ai:
-                for x in ai:
-                    kind_name = "Перевірка" if x["kind"] == "review" else "Пошук"
-                    lines.append(f"🤖 {kind_name}: {x['requests']} запитів, {x['inp']}/{x['outp']} токенів (вхід/вихід), ≈ ${float(x['usd']):.6f}")
-            else:
-                lines.append("🤖 AI-запитів за період немає.")
-        lines += ["", f"🧹 Усього очищено системних повідомлень: {all_cleanups}",
-                  "🚗 Оголошення та активність по групах (7 днів):"]
-        group_stats = await con.fetch("""SELECT category,count(*) n FROM ads GROUP BY category""")
-        group_totals = {row["category"]: row["n"] for row in group_stats}
+        fresh = await con.fetchval("SELECT count(*) FROM bot_users WHERE first_seen >= now()-interval '7 days'")
+        active = await con.fetchval("""SELECT count(DISTINCT user_id) FROM bot_activity
+            WHERE scope='private' AND created_at >= now()-interval '7 days'""")
+        ads = await con.fetchval("SELECT count(*) FROM ads")
+        actions = await con.fetch("""SELECT event,count(*) n FROM bot_activity
+            WHERE scope='private' AND created_at >= now()-interval '7 days'
+            GROUP BY event ORDER BY n DESC LIMIT 6""")
+        ai = await con.fetch("""SELECT kind,count(*) requests,sum(input_tokens) inp,
+            sum(output_tokens) outp,sum(estimated_usd) usd
+            FROM ai_usage GROUP BY kind ORDER BY kind""")
+        cleanups = await con.fetchval("SELECT count(*) FROM system_cleanup")
+        categories = await con.fetch("SELECT category,count(*) n FROM ads GROUP BY category")
+        counts = {row["category"]: row["n"] for row in categories}
+        labels = {"create":"Створення","search":"Пошук","my_ads":"Мої оголошення",
+                  "view":"Перегляди","edit":"Редагування","photo":"Фото",
+                  "start":"Запуски","message":"Повідомлення","button":"Кнопки"}
+        lines = ["🛡 АДМІНКА | АВТО МОТО УКРАЇНА", "",
+                 f"👤 Користувачі: {total} | Нові/7 днів: {fresh}",
+                 f"⚡ Активні/7 днів: {active}",
+                 f"📋 Оголошень у базі: {ads}", "",
+                 "📊 Дії за 7 днів:"]
+        lines.extend(f"• {labels.get(x['event'],x['event'])}: {x['n']}" for x in actions)
+        lines += ["", "🤖 AutoBot_AI (від початку обліку):"]
+        for x in ai:
+            kind = "Перевірки" if x["kind"] == "review" else "Пошуки"
+            lines.append(f"• {kind}: {x['requests']}; токени {x['inp']}/{x['outp']}; ≈ ${float(x['usd']):.6f}")
+        if not ai:
+            lines.append("• Запитів поки немає")
+        if not AI_INPUT_USD_M or not AI_OUTPUT_USD_M:
+            lines.append("⚠️ Тарифи AI ще не налаштовані")
+        lines += ["", f"🧹 Системних повідомлень видалено: {cleanups}", "", "👥 Групи:"]
         for name, group in GROUPS.items():
             try:
                 chat = await bot.get_chat(group)
                 members = await bot.get_chat_member_count(group)
                 row = await con.fetchrow("""SELECT count(*) messages,count(DISTINCT user_id) users
                     FROM bot_activity WHERE chat_id=$1 AND scope <> 'private'
-                    AND created_at >= now()-interval '7 days'""",chat.id)
-                group_7 = await con.fetchval("""SELECT count(*) FROM ads WHERE category=$1
-                    AND created_at >= now()-interval '7 days'""",name)
-                lines.append(f"• {name}: {members} учасників, {row['users']} активних, {row['messages']} повідомлень; оголошень {group_7}/7 днів, {group_totals.get(name,0)} всього")
+                    AND created_at >= now()-interval '7 days'""", chat.id)
+                lines.append(f"{name}: {members} учасників, {row['users']} активних, "
+                             f"{row['messages']} повідомлень/7 днів, {counts.get(name,0)} оголошень")
             except Exception:
-                lines.append(f"• {name}: оголошень {group_totals.get(name,0)}; статистика групи недоступна")
-        if not AI_INPUT_USD_M or not AI_OUTPUT_USD_M:
-            lines.append("⚠️ USD-витрати не розраховані: задай AI_INPUT_USD_PER_1M та AI_OUTPUT_USD_PER_1M у Render.")
-        lines.append("ℹ️ Історія активності та витрат доступна лише від початку їх обліку.")
+                lines.append(f"{name}: {counts.get(name,0)} оголошень (статистика недоступна)")
+        lines.append("\nℹ️ Статистика накопичується з початку обліку.")
     await m.answer("\n".join(lines), reply_markup=menu)
 
 
