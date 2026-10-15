@@ -254,16 +254,25 @@ async def select_callback(c: CallbackQuery):
     elif step == "model":
         d["model"] = chosen
         d["title"] = d["make"] + " " + chosen
-        await ask_next(c.message, s, c.from_user)
+        if d.get("_editing"):
+            await finish_edit(c.message, s, c.from_user)
+        else:
+            await ask_next(c.message, s, c.from_user)
     elif step in ("color", "fuel", "gearbox", "accident"):
         d[step] = chosen
-        await ask_next(c.message, s, c.from_user)
+        if d.get("_editing"):
+            await finish_edit(c.message, s, c.from_user)
+        else:
+            await ask_next(c.message, s, c.from_user)
     elif step == "region":
         d["region"] = chosen
         d["region_code"] = REGIONS[chosen]
         if chosen in ("Київ", "Севастополь"):
             d["city"] = chosen
-        await ask_next(c.message, s, c.from_user)
+        if d.get("_editing"):
+            await finish_edit(c.message, s, c.from_user)
+        else:
+            await ask_next(c.message, s, c.from_user)
     await c.answer()
     try:
         await c.message.edit_text("✅ Обрано: " + chosen)
@@ -518,9 +527,52 @@ CONFIRM = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="❌ Скасувати")],
 ], resize_keyboard=True)
 CONFIRM = ReplyKeyboardMarkup(keyboard=[
-    [KeyboardButton(text="✅ Опублікувати"), KeyboardButton(text="✏️ Почати заново")],
+    [KeyboardButton(text="✅ Опублікувати"), KeyboardButton(text="✏️ Редагувати пункт")],
+    [KeyboardButton(text="✏️ Почати заново")],
     [KeyboardButton(text="❌ Скасувати")],
 ], resize_keyboard=True)
+
+
+EDIT_FIELDS = [
+    ("🚘 Автомобіль (марка/модель)", "make"),
+    ("📅 Рік випуску", "year"),
+    ("🛣️ Пробіг / характеристики", "spec"),
+    ("🎨 Колір", "color"),
+    ("⛽ Пальне", "fuel"),
+    ("⚙️ Коробка передач", "gearbox"),
+    ("🚨 Участь у ДТП", "accident"),
+    ("💰 Ціна", "price"),
+    ("💵 Валюта", "currency"),
+    ("📍 Область", "region"),
+    ("🏘️ Населений пункт", "city"),
+    ("☎️ Контакт", "contact"),
+    ("📝 Опис", "description"),
+]
+EDIT_BACK = "↩️ Назад до оголошення"
+
+
+def edit_fields_for(d):
+    if d.get("category") == "🚗 Авторинок":
+        return EDIT_FIELDS
+    return [pair for pair in EDIT_FIELDS if pair[1] not in ("color", "fuel", "gearbox", "accident")]
+
+
+def edit_keyboard(d):
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=label)] for label, _ in edit_fields_for(d)] +
+                 [[KeyboardButton(text=EDIT_BACK)], [KeyboardButton(text="❌ Скасувати")]],
+        resize_keyboard=True,
+    )
+
+
+async def finish_edit(m, s, user=None):
+    s["data"].pop("_editing", None)
+    s["data"].pop("_ai_description", None)
+    s["step"] = "preview"
+    issues = listing_issues(s["data"])
+    if issues:
+        await m.answer("⚠️ Ще є суперечності:\n" + "\n".join("• " + i for i in issues))
+    await show_preview(m, s, user)
 
 
 def next_question(d):
@@ -705,6 +757,18 @@ async def ask_next(m, s, user=None):
         await m.answer(prompt, reply_markup=PHOTO_DONE if step == "photo" else CURRENCY if step == "currency" else menu)
 
 
+@dp.message(F.text == "✏️ Редагувати пункт")
+async def begin_edit(m: Message):
+    if not m.from_user or m.chat.type != "private":
+        return
+    s = sessions.get(m.from_user.id)
+    if not s or s["step"] != "preview":
+        await m.answer("Спочатку створи оголошення.")
+        return
+    s["step"] = "edit_pick"
+    await m.answer("✏️ Обери пункт для редагування:", reply_markup=edit_keyboard(s["data"]))
+
+
 @dp.message(F.text == "✏️ Почати заново")
 async def restart(m: Message):
     if not m.from_user or m.chat.type != "private":
@@ -801,7 +865,28 @@ async def wizard(m: Message):
         await m.answer("Зачекай, оголошення публікується.")
         return
     if step == "preview":
-        await m.answer("Обери «✅ Опублікувати» або «✏️ Почати заново».", reply_markup=CONFIRM)
+        await m.answer("Обери «✅ Опублікувати» або «✏️ Редагувати пункт».", reply_markup=CONFIRM)
+        return
+    if step == "edit_pick":
+        if value == EDIT_BACK:
+            await finish_edit(m, s)
+            return
+        choices = dict(edit_fields_for(d))
+        if value not in choices:
+            await m.answer("Обери пункт кнопкою.", reply_markup=edit_keyboard(d))
+            return
+        field = choices[value]
+        d["_editing"] = field
+        s["step"] = field
+        if field == "make":
+            await show_selection(m, s)
+        elif field in ("color", "fuel", "gearbox", "accident", "region"):
+            await show_selection(m, s)
+        elif field == "currency":
+            await m.answer("💵 Обери валюту:", reply_markup=CURRENCY)
+        else:
+            prompts = {"year":"📅 Введи правильний рік:", "spec":"🛣️ Введи пробіг або характеристики:", "price":"💰 Введи нову ціну:", "city":"🏘️ Введи населений пункт:", "contact":"☎️ Введи контакт:", "description":"📝 Введи новий опис:"}
+            await m.answer(prompts.get(field, "Введи нове значення:"))
         return
     if step == "ai_final_review" and value not in ("✅ Застосувати виправлення", "➡️ Залишити мій текст"):
         year_fix = re.search(r"(?:рік|року|рік випуску)\s*[:—–-]?\s*(\d{4})", value, re.I)
@@ -928,7 +1013,10 @@ async def wizard(m: Message):
             return
         d["model"] = value
         d["title"] = d["make"] + " " + value
-        await ask_next(m, s)
+        if d.get("_editing"):
+            await finish_edit(m, s)
+        else:
+            await ask_next(m, s)
         return
     if step in ("photo", "photo_more"):
         if value == "✅ Фото готові":
@@ -987,7 +1075,10 @@ async def wizard(m: Message):
             await m.answer("Введи коротку відповідь (до 90 символів, опис — до 280).")
             return
         d[step] = value
-    await ask_next(m, s)
+    if d.get("_editing"):
+        await finish_edit(m, s)
+    else:
+        await ask_next(m, s)
 
 
 @asynccontextmanager
