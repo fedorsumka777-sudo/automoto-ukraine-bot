@@ -177,6 +177,12 @@ def selections(s):
         return sorted(REGIONS)
     if step == "color":
         return COLORS
+    if step == "fuel":
+        return FUEL_OPTIONS
+    if step == "gearbox":
+        return GEARBOX_OPTIONS
+    if step == "accident":
+        return ACCIDENT_OPTIONS
     return []
 
 
@@ -204,14 +210,15 @@ def selection_keyboard(s, page=0):
 
 async def show_selection(m, s):
     prompts = {"make": "🚘 Обери марку:", "model": "🚗 Обери модель:",
-               "region": "📍 Обери область:", "color": "🎨 Обери колір автомобіля:"}
+               "region": "📍 Обери область:", "color": "🎨 Обери колір автомобіля:",
+               "fuel": "⛽ Вид пального:", "gearbox": "⚙️ Коробка передач:", "accident": "🚨 Участь у ДТП:"}
     await m.answer(prompts[s["step"]], reply_markup=selection_keyboard(s))
 
 
 @dp.callback_query(F.data.startswith("select:"))
 async def select_callback(c: CallbackQuery):
     s = sessions.get(c.from_user.id)
-    if not s or s["step"] not in ("make", "model", "region", "color"):
+    if not s or s["step"] not in ("make", "model", "region", "color", "fuel", "gearbox", "accident"):
         await c.answer("Це меню вже неактуальне.", show_alert=True)
         return
     try:
@@ -248,8 +255,8 @@ async def select_callback(c: CallbackQuery):
         d["model"] = chosen
         d["title"] = d["make"] + " " + chosen
         await ask_next(c.message, s, c.from_user)
-    elif step == "color":
-        d["color"] = chosen
+    elif step in ("color", "fuel", "gearbox", "accident"):
+        d[step] = chosen
         await ask_next(c.message, s, c.from_user)
     elif step == "region":
         d["region"] = chosen
@@ -476,6 +483,9 @@ EXTRAS = {
         ("year", "📅 Рік випуску? (наприклад 2012)"),
         ("spec", "🛣️ Пробіг у км? (наприклад 185000)"),
         ("color", "🎨 Обери колір автомобіля:"),
+        ("fuel", "⛽ Обери вид пального:"),
+        ("gearbox", "⚙️ Обери коробку передач:"),
+        ("accident", "🚨 Чи був автомобіль у ДТП?"),
     ],
     "🚜 Агромаркет": [
         ("year", "📅 Рік випуску техніки?"),
@@ -489,6 +499,9 @@ EXTRAS = {
 COLORS = ["Білий", "Чорний", "Сірий", "Сріблястий", "Червоний", "Синій",
           "Блакитний", "Зелений", "Жовтий", "Помаранчевий", "Коричневий",
           "Бежевий", "Бордовий", "Фіолетовий", "Золотистий", "Інший"]
+FUEL_OPTIONS = ["Бензин", "Дизель", "Газ", "Газ/бензин", "Гібрид", "Електро", "Інше"]
+GEARBOX_OPTIONS = ["Механіка", "Автомат"]
+ACCIDENT_OPTIONS = ["Так", "Ні"]
 CURRENCY = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="🇺🇦 UAH (грн)"), KeyboardButton(text="🇺🇸 USD ($)")],
     [KeyboardButton(text="❌ Скасувати")],
@@ -500,7 +513,7 @@ AI_FINAL_CHOICES = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="❌ Скасувати")],
 ], resize_keyboard=True)
 CONFIRM = ReplyKeyboardMarkup(keyboard=[
-    [KeyboardButton(text="✅ Використати опис Луни")],
+    [KeyboardButton(text="✅ Використати опис AutoBot_AI")],
     [KeyboardButton(text="🔄 Спробувати ще раз"), KeyboardButton(text="➡️ Залишити мій опис")],
     [KeyboardButton(text="❌ Скасувати")],
 ], resize_keyboard=True)
@@ -520,7 +533,7 @@ def next_question(d):
         ("city", "🏘️ Напиши назву міста, селища або села:"),
         ("contact", "Телефон або Telegram для зв'язку?"),
         ("photo", "📸 Надішли щонайменше 5 фотографій (можна альбомом), максимум 10."),
-        ("description", "📝 Наостанок детально опиши стан і особливості товару:"),
+        ("description", "📝 Наостанок детально опиши стан і особливості автомобіля:" if d["category"] == "🚗 Авторинок" else "📝 Наостанок детально опиши стан і особливості техніки:" if d["category"] == "🚜 Агромаркет" else "📝 Наостанок детально опиши стан і особливості запчастини:"),
     ]
     for field, prompt in fields:
         if field not in d:
@@ -540,6 +553,9 @@ def render_ad(d, user_id, username, first_name, ad_id=None):
         f"{html.escape(extra[0][1].split('?')[0])}: {html.escape(d[extra[0][0]])}",
         f"{html.escape(extra[1][1].split('?')[0])}: {html.escape(d[extra[1][0]])}",
         *([f"🎨 Колір: {html.escape(d['color'])}"] if category == "🚗 Авторинок" and d.get("color") else []),
+        *([f"⛽ Пальне: {html.escape(d['fuel'])}"] if category == "🚗 Авторинок" and d.get("fuel") else []),
+        *([f"⚙️ Коробка передач: {html.escape(d['gearbox'])}"] if category == "🚗 Авторинок" and d.get("gearbox") else []),
+        *([f"🚨 Участь у ДТП: {html.escape(d['accident'])}"] if category == "🚗 Авторинок" and d.get("accident") else []),
         f"💰 <b>{html.escape(d['price'])} {html.escape(d['currency'])}</b>",
         f"📍 {html.escape(d.get('region', ''))}, {html.escape(d['city'])}",
         f"☎️ {html.escape(d['contact'])}",
@@ -572,6 +588,14 @@ def listing_issues(data):
             found_mileage = re.search(r"пробіг\s*[:—–-]?\s*(\d[\d\s]{0,9})\s*(?:км)?", desc, re.I)
             if found_mileage and re.sub(r"\s", "", found_mileage.group(1)) != mileage:
                 issues.append("🛣️ У полі пробіг " + mileage + " км, а в описі " + found_mileage.group(1).strip() + " км. Уточни правильний пробіг.")
+    if category == "🚗 Авторинок":
+        for key, allowed, label in (
+            ("fuel", FUEL_OPTIONS, "⛽ Вид пального"),
+            ("gearbox", GEARBOX_OPTIONS, "⚙️ Коробка передач"),
+            ("accident", ACCIDENT_OPTIONS, "🚨 Участь у ДТП"),
+        ):
+            if data.get(key) not in allowed:
+                issues.append(label + ": обери відповідь зі списку.")
     if not str(data.get("price", "")).strip() or not str(data.get("contact", "")).strip():
         issues.append("💰☎️ Перевір ціну та контакт.")
     return issues
@@ -581,13 +605,13 @@ def review_listing_with_ai(data):
     """Proofread seller's text and provide non-binding practical tips."""
     context = {k: data.get(k, "") for k in (
         "category", "title", "make", "model", "year", "spec",
-        "description", "price", "currency", "region", "city", "contact")}
+        "description", "fuel", "gearbox", "accident", "color", "price", "currency", "region", "city", "contact")}
     payload = {
         "model": AI_MODEL, "temperature": 0.2, "max_tokens": 420,
         "response_format": {"type": "json_object"},
         "messages": [
             {"role": "system", "content":
-                "Ти Луна — редактор українських оголошень про автомобілі, агротехніку та запчастини. "
+                "Ти AutoBot_AI — редактор українських оголошень про автомобілі, агротехніку та запчастини. "
                 "Перевір КОЖНЕ поле: марку, модель, рік, пробіг, колір, ціну, валюту, місце, контакт та опис. Виявляй суперечності між ними. "
                 "Поверни JSON з двома ключами: corrected_description (рядок до 280 символів) "
                 "та tips (масив з 0–3 коротких конкретних підказок). "
@@ -637,7 +661,7 @@ async def run_final_ai_review(m, s, user=None):
         await show_preview(m, s, user)
         return
     s["step"] = "ai_final_processing"
-    await m.answer("🤖 Луна перевіряє правопис і готує підказки. Оголошення ще не опубліковано.")
+    await m.answer("🤖 AutoBot_AI перевіряє правопис і готує підказки. Оголошення ще не опубліковано.")
     try:
         corrected, tips = await asyncio.wait_for(
             asyncio.to_thread(review_listing_with_ai, dict(s["data"])), timeout=30)
@@ -650,13 +674,13 @@ async def run_final_ai_review(m, s, user=None):
     issues = listing_issues(s["data"])
     original = s["data"]["description"]
     s["data"]["_ai_description"] = corrected
-    lines = ["🤖 Перевірка Луни завершена."]
+    lines = ["🤖 Перевірка AutoBot_AI завершена."]
     if issues:
         lines.append("⚠️ Знайдено помилки / суперечності:\\n" + "\\n".join("• " + x for x in issues))
     if corrected != original:
         lines.append("✍️ Виправлений опис:\n" + corrected)
     else:
-        lines.append("✅ Мовних виправлень не потрібно.")
+        lines.append("✅ Опис не потребує мовного редагування." if not issues else "⚠️ У тексті мовних помилок не виявлено, але є логічні або фактичні суперечності.")
     if tips:
         lines.append("💡 Підказки:\n" + "\n".join("• " + t for t in tips))
     lines.append("Можеш написати додаткові відомості про товар — я додам їх до опису та ще раз перевірю. Або обери одну з кнопок нижче.")
@@ -672,7 +696,7 @@ async def ask_next(m, s, user=None):
     s["step"] = step
     if step == "preview":
         await run_final_ai_review(m, s, user)
-    elif step in ("make", "region", "color"):
+    elif step in ("make", "region", "color", "fuel", "gearbox", "accident"):
         await show_selection(m, s)
     else:
         await m.answer(prompt, reply_markup=PHOTO_DONE if step == "photo" else CURRENCY if step == "currency" else menu)
@@ -884,7 +908,7 @@ async def wizard(m: Message):
         d["category"] = value
         await ask_next(m, s)
         return
-    if step in ("make", "model", "region", "color"):
+    if step in ("make", "model", "region", "color", "fuel", "gearbox", "accident"):
         await m.answer("👇 Обери варіант кнопкою в повідомленні вище.", reply_markup=menu)
         return
     if step == "custom_make":
