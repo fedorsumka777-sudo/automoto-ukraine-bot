@@ -5,6 +5,7 @@ import re
 import json
 import asyncio
 from datetime import date
+from decimal import Decimal
 import urllib.request
 from contextlib import asynccontextmanager
 
@@ -102,7 +103,7 @@ async def record_ai_usage(kind, user_id, usage):
         async with db.acquire() as con:
             await con.execute(
                 "INSERT INTO ai_usage(user_id,kind,model,input_tokens,output_tokens,estimated_usd) VALUES($1,$2,$3,$4,$5,$6)",
-                user_id, kind, AI_MODEL, tokens_in, tokens_out, cost)
+                user_id, kind, AI_MODEL, tokens_in, tokens_out, Decimal(str(cost)))
     except Exception:
         logging.exception("Cannot record AI usage")
 
