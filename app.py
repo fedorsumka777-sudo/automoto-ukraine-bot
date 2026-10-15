@@ -174,6 +174,8 @@ def selections(s):
         return models(d["category"], d["make"])
     if step == "region":
         return sorted(REGIONS)
+    if step == "color":
+        return COLORS
     return []
 
 
@@ -201,14 +203,14 @@ def selection_keyboard(s, page=0):
 
 async def show_selection(m, s):
     prompts = {"make": "🚘 Обери марку:", "model": "🚗 Обери модель:",
-               "region": "📍 Обери область:"}
+               "region": "📍 Обери область:", "color": "🎨 Обери колір автомобіля:"}
     await m.answer(prompts[s["step"]], reply_markup=selection_keyboard(s))
 
 
 @dp.callback_query(F.data.startswith("select:"))
 async def select_callback(c: CallbackQuery):
     s = sessions.get(c.from_user.id)
-    if not s or s["step"] not in ("make", "model", "region"):
+    if not s or s["step"] not in ("make", "model", "region", "color"):
         await c.answer("Це меню вже неактуальне.", show_alert=True)
         return
     try:
@@ -244,6 +246,9 @@ async def select_callback(c: CallbackQuery):
     elif step == "model":
         d["model"] = chosen
         d["title"] = d["make"] + " " + chosen
+        await ask_next(c.message, s, c.from_user)
+    elif step == "color":
+        d["color"] = chosen
         await ask_next(c.message, s, c.from_user)
     elif step == "region":
         d["region"] = chosen
@@ -469,6 +474,7 @@ EXTRAS = {
     "🚗 Авторинок": [
         ("year", "📅 Рік випуску? (наприклад 2012)"),
         ("spec", "🛣️ Пробіг у км? (наприклад 185000)"),
+        ("color", "🎨 Обери колір автомобіля:"),
     ],
     "🚜 Агромаркет": [
         ("year", "📅 Рік випуску техніки?"),
@@ -479,6 +485,9 @@ EXTRAS = {
         ("spec", "📦 Стан: нова чи б/в?"),
     ],
 }
+COLORS = ["Білий", "Чорний", "Сірий", "Сріблястий", "Червоний", "Синій",
+          "Блакитний", "Зелений", "Жовтий", "Помаранчевий", "Коричневий",
+          "Бежевий", "Бордовий", "Фіолетовий", "Золотистий", "Інший"]
 CURRENCY = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="🇺🇦 UAH (грн)"), KeyboardButton(text="🇺🇸 USD ($)")],
     [KeyboardButton(text="❌ Скасувати")],
@@ -529,6 +538,7 @@ def render_ad(d, user_id, username, first_name, ad_id=None):
         f"<b>{html.escape(d['title'])}</b>",
         f"🔹 {html.escape(extra[0][1].split('?')[0])}: {html.escape(d[extra[0][0]])}",
         f"🔹 {html.escape(extra[1][1].split('?')[0])}: {html.escape(d[extra[1][0]])}",
+        *([f"🎨 Колір: {html.escape(d['color'])}"] if category == "🚗 Авторинок" and d.get("color") else []),
         f"📝 {html.escape(d['description'])}",
         f"💰 <b>{html.escape(d['price'])} {html.escape(d['currency'])}</b>",
         f"📍 {html.escape(d.get('region', ''))}, {html.escape(d['city'])}",
@@ -630,10 +640,10 @@ async def ask_next(m, s, user=None):
     s["step"] = step
     if step == "preview":
         await run_final_ai_review(m, s, user)
-    elif step in ("make", "region"):
+    elif step in ("make", "region", "color"):
         await show_selection(m, s)
     else:
-        await m.answer(prompt, reply_markup=CURRENCY if step == "currency" else menu)
+        await m.answer(prompt, reply_markup=PHOTO_DONE if step == "photo" else CURRENCY if step == "currency" else menu)
 
 
 @dp.message(F.text == "✏️ Почати заново")
@@ -806,7 +816,7 @@ async def wizard(m: Message):
         d["category"] = value
         await ask_next(m, s)
         return
-    if step in ("make", "model", "region"):
+    if step in ("make", "model", "region", "color"):
         await m.answer("👇 Обери варіант кнопкою в повідомленні вище.", reply_markup=menu)
         return
     if step == "custom_make":
@@ -848,10 +858,9 @@ async def wizard(m: Message):
             photos.append(photo)
         s["step"] = "photo_more"
         # Telegram albums arrive in separate updates: never finalize early.
-        if not m.media_group_id or len(photos) == 10:
-            await m.answer(f"📸 Додано {len(photos)} фото з 5–10. "
-                           + ("✅ Можеш завершити." if len(photos)>=5 else f"Додай ще {5-len(photos)}."),
-                           reply_markup=PHOTO_DONE)
+        await m.answer(f"📸 Фото отримано: {len(photos)}/10. "
+                       + ("Натисни «✅ Фото готові», коли завершиш." if len(photos)>=5 else f"Додай ще щонайменше {5-len(photos)}."),
+                       reply_markup=PHOTO_DONE)
         return
     if step == "currency":
         if value not in ("🇺🇦 UAH (грн)", "🇺🇸 USD ($)"):
