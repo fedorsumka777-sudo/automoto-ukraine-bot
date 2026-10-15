@@ -23,6 +23,8 @@ SECRET = os.environ["WEBHOOK_SECRET"]
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 AI_MODEL = os.getenv("AI_MODEL", "gpt-4o-mini")
+AI_INPUT_USD_M = float(os.getenv("AI_INPUT_USD_PER_1M", "0"))
+AI_OUTPUT_USD_M = float(os.getenv("AI_OUTPUT_USD_PER_1M", "0"))
 CHANNEL_AUTOMOTO = os.getenv("CHANNEL_AUTOMOTO", "").strip()
 GROUPS = {
     "🚗 Авторинок": os.getenv("GROUP_AUTORINOK", "@AutoMotoAvtorunok"),
@@ -90,6 +92,21 @@ async def track_update(update):
                           user.id,chat.id,chat.type,event)
 
 
+async def record_ai_usage(kind, user_id, usage):
+    """Persistent token accounting; estimated dollars require configured model rates."""
+    usage = usage or {}
+    tokens_in = int(usage.get("prompt_tokens") or 0)
+    tokens_out = int(usage.get("completion_tokens") or 0)
+    cost = (tokens_in * AI_INPUT_USD_M + tokens_out * AI_OUTPUT_USD_M) / 1_000_000
+    try:
+        async with db.acquire() as con:
+            await con.execute(
+                "INSERT INTO ai_usage(user_id,kind,model,input_tokens,output_tokens,estimated_usd) VALUES($1,$2,$3,$4,$5,$6)",
+                user_id, kind, AI_MODEL, tokens_in, tokens_out, cost)
+    except Exception:
+        logging.exception("Cannot record AI usage")
+
+
 @dp.message(F.text == "/admin")
 async def show_admin(m: Message):
     if m.chat.type != "private" or not ADMIN_USER_ID or m.from_user.id != ADMIN_USER_ID:
@@ -101,6 +118,8 @@ async def show_admin(m: Message):
         actions = await con.fetch("""SELECT event,count(*) n FROM bot_activity WHERE scope='private'
                AND created_at>=now()-interval '7 days' GROUP BY event ORDER BY n DESC LIMIT 6""")
         ads = await con.fetchval("SELECT count(*) FROM ads")
+        usage = await con.fetch("""SELECT kind,count(*) requests,sum(input_tokens) inp,
+                       sum(output_tokens) outp,sum(estimated_usd) usd FROM ai_usage GROUP BY kind ORDER BY kind""")
     labels = {"create":"Створювали оголошення","search":"Шукали","my_ads":"Мої оголошення",
               "view":"Переглядали","edit":"Редагували","photo":"Надсилали фото",
               "start":"Запускали","message":"Відповідали","button":"Натискали кнопки"}
@@ -109,6 +128,14 @@ async def show_admin(m: Message):
              f"⚡ Активні за 7 днів: {active}",f"📋 Оголошень у базі: {ads}",
              "", "📊 Дії за 7 днів:"]
     lines.extend(f"• {labels.get(r['event'],r['event'])}: {r['n']}" for r in actions)
+    lines += ["", "🤖 ВИТРАТИ AutoBot_AI (від запуску обліку):"]
+    for row in usage:
+        label = "Перевірка оголошень" if row["kind"] == "review" else "Розумний пошук"
+        lines.append(f"• {label}: {row['requests']} запитів; вхід {row['inp']}, вихід {row['outp']} токенів; ≈ ${float(row['usd']):.6f}")
+    if not usage:
+        lines.append("Поки немає записів.")
+    if AI_INPUT_USD_M == 0 or AI_OUTPUT_USD_M == 0:
+        lines.append("⚠️ Вартість у USD не налаштована. Вкажи AI_INPUT_USD_PER_1M і AI_OUTPUT_USD_PER_1M для моделі.")
     lines += ["", "👥 Групи:"]
     for name,group in GROUPS.items():
         try:
@@ -696,7 +723,7 @@ def review_listing_with_ai(data):
     tips = result.get("tips", [])
     if not isinstance(tips, list):
         tips = []
-    return corrected, [str(t)[:180] for t in tips[:3] if isinstance(t, str) and t.strip()]
+    return corrected, [str(t)[:180] for t in tips[:3] if isinstance(t, str) and t.strip()], raw.get("usage", {})
 
 
 async def show_preview(m, s, user=None):
@@ -718,7 +745,7 @@ async def run_final_ai_review(m, s, user=None):
     s["step"] = "ai_final_processing"
     await m.answer("🤖 AutoBot_AI перевіряє правопис і готує підказки. Оголошення ще не опубліковано.")
     try:
-        corrected, tips = await asyncio.wait_for(
+        corrected, tips, usage = await asyncio.wait_for(
             asyncio.to_thread(review_listing_with_ai, dict(s["data"])), timeout=30)
     except Exception:
         logging.exception("Final AI review failed")
@@ -726,6 +753,7 @@ async def run_final_ai_review(m, s, user=None):
         await m.answer("⚠️ AutoBot_AI тимчасово недоступний. Обов’язкові програмні перевірки діють перед публікацією.")
         await show_preview(m, s, user)
         return
+    await record_ai_usage("review", user.id, usage)
     issues = listing_issues(s["data"])
     original = s["data"]["description"]
     s["data"]["_ai_description"] = corrected
@@ -929,7 +957,7 @@ def ai_search_variants(query):
     suggestions = json.loads(output["choices"][0]["message"]["content"]).get("variants", [])
     if not isinstance(suggestions, list):
         return []
-    return [x.strip() for x in suggestions[:4] if isinstance(x, str) and 2 <= len(x.strip()) <= 60]
+    return [x.strip() for x in suggestions[:4] if isinstance(x, str) and 2 <= len(x.strip()) <= 60], output.get("usage", {})
 
 
 async def find_ads(category, variants):
@@ -1076,7 +1104,8 @@ async def wizard(m: Message):
         rows = await find_ads(category, variants)
         if not rows and OPENAI_API_KEY:
             try:
-                ai_variants = await asyncio.wait_for(asyncio.to_thread(ai_search_variants, value), timeout=10)
+                ai_variants, usage = await asyncio.wait_for(asyncio.to_thread(ai_search_variants, value), timeout=10)
+                await record_ai_usage("search", m.from_user.id, usage)
                 rows = await find_ads(category, variants + ai_variants)
             except Exception:
                 logging.exception("AI search normalization failed")
@@ -1206,6 +1235,12 @@ async def lifespan(app: FastAPI):
             event TEXT, created_at TIMESTAMPTZ DEFAULT now())""")
         await con.execute("CREATE INDEX IF NOT EXISTS bot_activity_date_idx ON bot_activity(created_at)")
         await con.execute("CREATE INDEX IF NOT EXISTS bot_activity_group_idx ON bot_activity(chat_id,created_at)")
+        await con.execute("""CREATE TABLE IF NOT EXISTS ai_usage(
+            id BIGSERIAL PRIMARY KEY, user_id BIGINT, kind TEXT NOT NULL, model TEXT NOT NULL,
+            input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+            estimated_usd NUMERIC(16,8) NOT NULL DEFAULT 0,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now())""")
+        await con.execute("CREATE INDEX IF NOT EXISTS ai_usage_created_idx ON ai_usage(created_at)")
     await bot.set_my_commands([BotCommand(command="start", description="🚀 Головне меню"),
                                BotCommand(command="help", description="ℹ️ Як користуватися ботом")])
     if ADMIN_USER_ID:
