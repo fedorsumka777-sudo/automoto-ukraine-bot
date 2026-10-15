@@ -136,48 +136,58 @@ async def remove_system_notice(m: Message):
 
 @dp.message(F.text == "/admin")
 async def show_admin(m: Message):
-    if m.chat.type != "private" or not ADMIN_USER_ID or m.from_user.id != ADMIN_USER_ID:
+    if m.chat.type != "private" or not m.from_user or not ADMIN_USER_ID or m.from_user.id != ADMIN_USER_ID:
         return
+    periods = [("Сьогодні", "date_trunc('day', now() AT TIME ZONE 'Europe/Kyiv') AT TIME ZONE 'Europe/Kyiv'"),
+               ("7 днів", "now() - interval '7 days'"),
+               ("30 днів", "now() - interval '30 days'")]
     async with db.acquire() as con:
         total = await con.fetchval("SELECT count(*) FROM bot_users")
-        fresh = await con.fetchval("SELECT count(*) FROM bot_users WHERE first_seen>=now()-interval '7 days'")
-        active = await con.fetchval("SELECT count(DISTINCT user_id) FROM bot_activity WHERE scope='private' AND created_at>=now()-interval '7 days'")
-        actions = await con.fetch("""SELECT event,count(*) n FROM bot_activity WHERE scope='private'
-               AND created_at>=now()-interval '7 days' GROUP BY event ORDER BY n DESC LIMIT 6""")
-        ads = await con.fetchval("SELECT count(*) FROM ads")
-        cleanups = await con.fetchval("SELECT count(*) FROM system_cleanup")
-        usage = await con.fetch("""SELECT kind,count(*) requests,sum(input_tokens) inp,
-                       sum(output_tokens) outp,sum(estimated_usd) usd FROM ai_usage GROUP BY kind ORDER BY kind""")
-    labels = {"create":"Створювали оголошення","search":"Шукали","my_ads":"Мої оголошення",
-              "view":"Переглядали","edit":"Редагували","photo":"Надсилали фото",
-              "start":"Запускали","message":"Відповідали","button":"Натискали кнопки"}
-    lines = ["🛡 АДМІНКА | АВТО МОТО УКРАЇНА", "",
-             f"👤 Користувачі бота: {total}", f"🆕 Нові за 7 днів: {fresh}",
-             f"⚡ Активні за 7 днів: {active}",f"📋 Оголошень у базі: {ads}",
-             "", "📊 Дії за 7 днів:"]
-    lines.extend(f"• {labels.get(r['event'],r['event'])}: {r['n']}" for r in actions)
-    lines += ["", "🤖 ВИТРАТИ AutoBot_AI (від запуску обліку):"]
-    for row in usage:
-        label = "Перевірка оголошень" if row["kind"] == "review" else "Розумний пошук"
-        lines.append(f"• {label}: {row['requests']} запитів; вхід {row['inp']}, вихід {row['outp']} токенів; ≈ ${float(row['usd']):.6f}")
-    if not usage:
-        lines.append("Поки немає записів.")
-    if AI_INPUT_USD_M == 0 or AI_OUTPUT_USD_M == 0:
-        lines.append("⚠️ Вартість у USD не налаштована. Вкажи AI_INPUT_USD_PER_1M і AI_OUTPUT_USD_PER_1M для моделі.")
-    lines += ["", f"🧹 Видалено системних повідомлень: {cleanups}", "👥 Групи:"]
-    for name,group in GROUPS.items():
-        try:
-            count = await bot.get_chat_member_count(group)
-            chat = await bot.get_chat(group)
-            async with db.acquire() as con:
+        ads_total = await con.fetchval("SELECT count(*) FROM ads")
+        all_cleanups = await con.fetchval("SELECT count(*) FROM system_cleanup")
+        lines = ["🛡 АДМІНКА | АВТО МОТО УКРАЇНА",
+                 f"👤 Усього користувачів бота: {total}",
+                 f"📋 Усього оголошень у базі: {ads_total}"]
+        for label, since in periods:
+            new_users = await con.fetchval(f"SELECT count(*) FROM bot_users WHERE first_seen >= {since}")
+            active = await con.fetchval(f"SELECT count(DISTINCT user_id) FROM bot_activity WHERE scope='private' AND created_at >= {since}")
+            actions = await con.fetch(f"""SELECT event,count(*) n FROM bot_activity
+                WHERE scope='private' AND created_at >= {since} GROUP BY event ORDER BY n DESC LIMIT 5""")
+            posts = await con.fetchval(f"SELECT count(*) FROM ads WHERE created_at >= {since}")
+            ai = await con.fetch(f"""SELECT kind,count(*) requests,coalesce(sum(input_tokens),0) inp,
+                coalesce(sum(output_tokens),0) outp,coalesce(sum(estimated_usd),0) usd
+                FROM ai_usage WHERE created_at >= {since} GROUP BY kind ORDER BY kind""")
+            cleaned = await con.fetchval(f"SELECT count(*) FROM system_cleanup WHERE created_at >= {since}")
+            lines += ["", f"📊 {label}:",
+                      f"👤 Нові: {new_users} | Активні: {active} | Оголошення: {posts}",
+                      "💬 Дії: " + (", ".join(f"{x['event']} — {x['n']}" for x in actions) if actions else "немає"),
+                      f"🧹 Очищено службових: {cleaned}"]
+            if ai:
+                for x in ai:
+                    kind_name = "Перевірка" if x["kind"] == "review" else "Пошук"
+                    lines.append(f"🤖 {kind_name}: {x['requests']} запитів, {x['inp']}/{x['outp']} токенів (вхід/вихід), ≈ ${float(x['usd']):.6f}")
+            else:
+                lines.append("🤖 AI-запитів за період немає.")
+        lines += ["", f"🧹 Усього очищено системних повідомлень: {all_cleanups}",
+                  "🚗 Оголошення та активність по групах (7 днів):"]
+        group_stats = await con.fetch("""SELECT category,count(*) n FROM ads GROUP BY category""")
+        group_totals = {row["category"]: row["n"] for row in group_stats}
+        for name, group in GROUPS.items():
+            try:
+                chat = await bot.get_chat(group)
+                members = await bot.get_chat_member_count(group)
                 row = await con.fetchrow("""SELECT count(*) messages,count(DISTINCT user_id) users
-                   FROM bot_activity WHERE chat_id=$1 AND scope<>'private'
-                   AND created_at>=now()-interval '7 days'""",chat.id)
-            lines.append(f"{name}: {count} учасників, {row['users']} активних, {row['messages']} повідомлень/7 днів")
-        except Exception:
-            lines.append(f"{name}: немає доступу до статистики")
-    lines.append("\nℹ️ Дані активності збираються з моменту оновлення. Для підрахунку всіх повідомлень потрібен вимкнений Privacy Mode.")
-    await m.answer("\n".join(lines),reply_markup=menu)
+                    FROM bot_activity WHERE chat_id=$1 AND scope <> 'private'
+                    AND created_at >= now()-interval '7 days'""",chat.id)
+                group_7 = await con.fetchval("""SELECT count(*) FROM ads WHERE category=$1
+                    AND created_at >= now()-interval '7 days'""",name)
+                lines.append(f"• {name}: {members} учасників, {row['users']} активних, {row['messages']} повідомлень; оголошень {group_7}/7 днів, {group_totals.get(name,0)} всього")
+            except Exception:
+                lines.append(f"• {name}: оголошень {group_totals.get(name,0)}; статистика групи недоступна")
+        if not AI_INPUT_USD_M or not AI_OUTPUT_USD_M:
+            lines.append("⚠️ USD-витрати не розраховані: задай AI_INPUT_USD_PER_1M та AI_OUTPUT_USD_PER_1M у Render.")
+        lines.append("ℹ️ Історія активності та витрат доступна лише від початку їх обліку.")
+    await m.answer("\n".join(lines), reply_markup=menu)
 
 
 @dp.message(F.text.startswith("/pinbot"))
