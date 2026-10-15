@@ -12,7 +12,7 @@ import asyncpg
 from catalog import REGIONS, OTHER, keyboard, makes, models, matches, settlements, PLACES
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, Update, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, InputMediaPhoto, InputMediaDocument, BotCommand, BotCommandScopeChat
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, Update, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, InputMediaPhoto, InputMediaDocument, InputMediaVideo, BotCommand, BotCommandScopeChat
 from fastapi import FastAPI, Request, HTTPException
 
 logging.basicConfig(level=logging.INFO)
@@ -515,7 +515,7 @@ CURRENCY = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="🇺🇦 UAH (грн)"), KeyboardButton(text="🇺🇸 USD ($)")],
     [KeyboardButton(text="❌ Скасувати")],
 ], resize_keyboard=True)
-PHOTO_DONE = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="✅ Фото готові")], [KeyboardButton(text="❌ Скасувати")]], resize_keyboard=True)
+PHOTO_DONE = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="✅ Медіа готові")], [KeyboardButton(text="❌ Скасувати")]], resize_keyboard=True)
 AI_FINAL_CHOICES = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="✅ Застосувати виправлення")],
     [KeyboardButton(text="➡️ Залишити мій текст")],
@@ -584,7 +584,7 @@ def next_question(d):
         ("region", "📍 Обери область України:"),
         ("city", "🏘️ Напиши назву міста, селища або села:"),
         ("contact", "☎️ Введи телефон (10 цифр, наприклад 0180965315) або Telegram @username:"),
-        ("photo", "📸 Надішли щонайменше 5 фотографій (можна альбомом), максимум 10."),
+        ("photo", "📸 Надішли щонайменше 1 фото. Можна додати відео (за бажанням). Максимум 10 медіафайлів загалом. Натисни «✅ Медіа готові» після додавання."),
         ("description", "📝 Наостанок детально опиши стан і особливості автомобіля:" if d["category"] == "🚗 Авторинок" else "📝 Наостанок детально опиши стан і особливості техніки:" if d["category"] == "🚜 Агромаркет" else "📝 Наостанок детально опиши стан і особливості запчастини:"),
     ]
     for field, prompt in fields:
@@ -701,7 +701,7 @@ def review_listing_with_ai(data):
 
 async def show_preview(m, s, user=None):
     user = user or m.from_user
-    await m.answer("📸 Додано фотографій: " + str(len(s["data"]["photos"])) +
+    await m.answer("📸 Додано фото/відео: " + str(len(s["data"]["photos"])) +
                    ". Перевір оголошення:")
     await m.answer(render_ad(s["data"], user.id, user.username, user.first_name),
                    parse_mode="HTML", reply_markup=CONFIRM)
@@ -782,7 +782,7 @@ async def publish(m: Message):
     if not m.from_user or m.chat.type != "private":
         return
     s = sessions.get(m.from_user.id)
-    if not s or s["step"] != "preview" or len(s["data"].get("photos", [])) < 5:
+    if not s or s["step"] != "preview" or len(s["data"].get("photos", [])) < 1:
         await m.answer("Немає готового оголошення. Натисни /start.")
         return
     issues = listing_issues(s["data"])
@@ -800,24 +800,30 @@ async def publish(m: Message):
                 """INSERT INTO ads (user_id,username,category,title,description,price,city,contact,photo_id)
                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id""",
                 m.from_user.id, m.from_user.username, d["category"], d["title"],
-                description, f"{d['price']} {d['currency']}", d["city"], d["contact"], d["photos"][0][0]
+                description, f"{d['price']} {d['currency']}", d["city"], d["contact"], next(fid for fid, kind in d["photos"] if kind in ("photo", "document"))
             )
         target = GROUPS[d["category"]]
         caption = render_ad(d, m.from_user.id, m.from_user.username, m.from_user.first_name, ad_id)
 
-        def make_album():
-            # Telegram media objects cannot be reused across send requests.
-            return [
-                (InputMediaDocument(media=fid, caption=caption, parse_mode="HTML")
-                 if kind == "document" else InputMediaPhoto(media=fid, caption=caption, parse_mode="HTML"))
-                if index == 0 else
-                (InputMediaDocument(media=fid) if kind == "document" else InputMediaPhoto(media=fid))
-                for index, (fid, kind) in enumerate(d["photos"])
-            ]
+        async def post_media(chat):
+            # Sending individually also supports exactly one photo and mixed documents/videos.
+            sent = []
+            for i, (fid, kind) in enumerate(d["photos"]):
+                kwargs = {"chat_id": chat, "parse_mode": "HTML"} if i == 0 else {"chat_id": chat}
+                if i == 0:
+                    kwargs["caption"] = caption
+                if kind == "photo":
+                    message = await bot.send_photo(photo=fid, **kwargs)
+                elif kind == "video":
+                    message = await bot.send_video(video=fid, **kwargs)
+                else:
+                    message = await bot.send_document(document=fid, **kwargs)
+                sent.append(message)
+            return sent
 
         results = []
         try:
-            posted = await bot.send_media_group(target, media=make_album())
+            posted = await post_media(target)
             async with db.acquire() as con:
                 await con.execute(
                     "UPDATE ads SET group_chat_id=$1,group_message_id=$2 WHERE id=$3",
@@ -830,7 +836,7 @@ async def publish(m: Message):
         if CHANNEL_AUTOMOTO:
             try:
                 # Channel publishing is independent of the selected group.
-                channel_posted = await bot.send_media_group(CHANNEL_AUTOMOTO, media=make_album())
+                channel_posted = await post_media(CHANNEL_AUTOMOTO)
                 async with db.acquire() as con:
                     await con.execute(
                         "UPDATE ads SET channel_chat_id=$1,channel_message_id=$2 WHERE id=$3",
@@ -1111,30 +1117,31 @@ async def wizard(m: Message):
             await ask_next(m, s)
         return
     if step in ("photo", "photo_more"):
-        if value == "✅ Фото готові":
-            if len(d.get("photos", [])) < 5:
-                await m.answer(f"📸 Додано {len(d.get('photos', []))} фото. Потрібно мінімум 5.", reply_markup=PHOTO_DONE)
+        if value in ("✅ Медіа готові", "✅ Фото готові"):
+            media = d.get("photos", [])
+            if not any(kind in ("photo", "document") for _, kind in media):
+                await m.answer("📸 Потрібно щонайменше одне фото. Відео необов’язкове.", reply_markup=PHOTO_DONE)
                 return
             d["photo"] = True
             await ask_next(m, s)
             return
         if m.photo:
-            photo = (m.photo[-1].file_id, "photo")
+            item = (m.photo[-1].file_id, "photo")
         elif m.document and (m.document.mime_type or "").startswith("image/"):
-            photo = (m.document.file_id, "document")
+            item = (m.document.file_id, "document")
+        elif m.video:
+            item = (m.video.file_id, "video")
         else:
-            await m.answer("📸 Надішли від 5 до 10 фото й натисни «✅ Фото готові».", reply_markup=PHOTO_DONE)
+            await m.answer("📸 Надішли фото або відео (до 10 файлів), потім натисни «✅ Медіа готові».", reply_markup=PHOTO_DONE)
             return
-        photos = d.setdefault("photos", [])
-        if photos and photo[1] != photos[0][1]:
-            await m.answer("📸 Не змішуй фото та документи. Надішли всі зображення одним способом.")
-            return
-        if len(photos) < 10 and photo[0] not in {p[0] for p in photos}:
-            photos.append(photo)
+        media = d.setdefault("photos", [])
+        if len(media) < 10 and item[0] not in {p[0] for p in media}:
+            media.append(item)
         s["step"] = "photo_more"
-        # Telegram albums arrive in separate updates: never finalize early.
-        await m.answer(f"📸 Фото отримано: {len(photos)}/10. "
-                       + ("Натисни «✅ Фото готові», коли завершиш." if len(photos)>=5 else f"Додай ще щонайменше {5-len(photos)}."),
+        photos_count = sum(kind in ("photo", "document") for _, kind in media)
+        videos_count = sum(kind == "video" for _, kind in media)
+        await m.answer(f"📸 Фото: {photos_count}, 🎬 відео: {videos_count}. Усього {len(media)}/10. " +
+                       ("Натисни «✅ Медіа готові» або додай ще." if photos_count else "Додай щонайменше 1 фото."),
                        reply_markup=PHOTO_DONE)
         return
     if step == "currency":
