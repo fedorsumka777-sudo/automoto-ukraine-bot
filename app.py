@@ -668,7 +668,7 @@ async def run_final_ai_review(m, s, user=None):
     except Exception:
         logging.exception("Final AI review failed")
         s["step"] = "preview"
-        await m.answer("⚠️ AI-перевірка зараз недоступна. Можна опублікувати власний текст.")
+        await m.answer("⚠️ AutoBot_AI тимчасово недоступний. Обов’язкові програмні перевірки діють перед публікацією.")
         await show_preview(m, s, user)
         return
     issues = listing_issues(s["data"])
@@ -676,14 +676,14 @@ async def run_final_ai_review(m, s, user=None):
     s["data"]["_ai_description"] = corrected
     lines = ["🤖 Перевірка AutoBot_AI завершена."]
     if issues:
-        lines.append("⚠️ Знайдено помилки / суперечності:\\n" + "\\n".join("• " + x for x in issues))
+        lines.append("⚠️ Знайдено помилки / суперечності:\n" + "\n".join("• " + x for x in issues))
     if corrected != original:
         lines.append("✍️ Виправлений опис:\n" + corrected)
     else:
         lines.append("✅ Опис не потребує мовного редагування." if not issues else "⚠️ У тексті мовних помилок не виявлено, але є логічні або фактичні суперечності.")
     if tips:
         lines.append("💡 Підказки:\n" + "\n".join("• " + t for t in tips))
-    lines.append("Можеш написати додаткові відомості про товар — я додам їх до опису та ще раз перевірю. Або обери одну з кнопок нижче.")
+    lines.append("Можеш написати додаткові відомості про автомобіль — я додам їх до опису та ще раз перевірю. Або обери одну з кнопок нижче." if s["data"]["category"] == "🚗 Авторинок" else "Можеш написати додаткові відомості — я додам їх до опису та ще раз перевірю. Або обери одну з кнопок нижче.")
     s["step"] = "ai_final_review"
     if issues:
         lines.append("⛔ Не публікуй, доки не виправиш ці дані. Надішли уточнення, наприклад: «рік 2022, пробіг 180000».")
