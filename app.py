@@ -559,18 +559,18 @@ def listing_issues(data):
     category = data.get("category", "")
     if category in ("🚗 Авторинок", "🚜 Агромаркет"):
         year = str(data.get("year", "")).strip()
-        if not re.fullmatch(r"\\d{4}", year) or not 1886 <= int(year) <= date.today().year + 1:
+        if not re.fullmatch(r"\d{4}", year) or not 1886 <= int(year) <= date.today().year + 1:
             issues.append("📅 Некоректний рік випуску: " + year + ". Уточни реальний рік.")
         desc = str(data.get("description", ""))
-        found_year = re.search(r"(?<!\\d)(?:19\\d{2}|20\\d{2}|21\\d{2})(?!\\d)\\s*(?:рік|року|р\\.)", desc, re.I)
+        found_year = re.search(r"(?<!\d)(?:19\d{2}|20\d{2}|21\d{2})(?!\d)\s*(?:рік|року|р\.)", desc, re.I)
         if found_year and found_year.group(0)[:4] != year:
             issues.append("📅 У полі року " + year + ", а в описі " + found_year.group(0)[:4] + ". Уточни, який рік правильний.")
         if category == "🚗 Авторинок":
             mileage = str(data.get("spec", "")).strip()
-            if not re.fullmatch(r"\\d{1,7}", mileage):
+            if not re.fullmatch(r"\d{1,7}", mileage):
                 issues.append("🛣️ Пробіг має бути числом у кілометрах.")
-            found_mileage = re.search(r"пробіг\\s*[:—–-]?\\s*(\\d[\\d\\s]{0,9})\\s*(?:км)?", desc, re.I)
-            if found_mileage and re.sub(r"\\s", "", found_mileage.group(1)) != mileage:
+            found_mileage = re.search(r"пробіг\s*[:—–-]?\s*(\d[\d\s]{0,9})\s*(?:км)?", desc, re.I)
+            if found_mileage and re.sub(r"\s", "", found_mileage.group(1)) != mileage:
                 issues.append("🛣️ У полі пробіг " + mileage + " км, а в описі " + found_mileage.group(1).strip() + " км. Уточни правильний пробіг.")
     if not str(data.get("price", "")).strip() or not str(data.get("contact", "")).strip():
         issues.append("💰☎️ Перевір ціну та контакт.")
@@ -610,8 +610,8 @@ def review_listing_with_ai(data):
         raw = json.load(response)
     result = json.loads(raw["choices"][0]["message"]["content"])
     corrected = str(result.get("corrected_description") or "").strip()
-    original_numbers = sorted(re.findall(r"\\d+(?:[.,]\\d+)?", data["description"]))
-    proposed_numbers = sorted(re.findall(r"\\d+(?:[.,]\\d+)?", corrected))
+    original_numbers = sorted(re.findall(r"\d+(?:[.,]\d+)?", data["description"]))
+    proposed_numbers = sorted(re.findall(r"\d+(?:[.,]\d+)?", corrected))
     if not corrected or len(corrected) > 280 or original_numbers != proposed_numbers:
         corrected = data["description"]
     tips = result.get("tips", [])
@@ -694,6 +694,10 @@ async def publish(m: Message):
     if not s or s["step"] != "preview" or len(s["data"].get("photos", [])) < 5:
         await m.answer("Немає готового оголошення. Натисни /start.")
         return
+    issues = listing_issues(s["data"])
+    if issues:
+        await m.answer("⛔ Оголошення має помилки:\n" + "\n".join("• " + issue for issue in issues) + "\nПочни оформлення заново з правильними даними.")
+        return
     s["step"] = "publishing"
     d = s["data"]
     extras = EXTRAS[d["category"]]
@@ -773,13 +777,16 @@ async def wizard(m: Message):
         await m.answer("Обери «✅ Опублікувати» або «✏️ Почати заново».", reply_markup=CONFIRM)
         return
     if step == "ai_final_review" and value not in ("✅ Застосувати виправлення", "➡️ Залишити мій текст"):
-        year_fix = re.search(r"(?:рік|року|рік випуску)\\s*[:—–-]?\\s*(\\d{4})", value, re.I)
-        mileage_fix = re.search(r"пробіг\\s*[:—–-]?\\s*(\\d[\\d\\s]{0,9})\\s*(?:км)?", value, re.I)
+        year_fix = re.search(r"(?:рік|року|рік випуску)\s*[:—–-]?\s*(\d{4})", value, re.I)
+        mileage_fix = re.search(r"пробіг\s*[:—–-]?\s*(\d[\d\s]{0,9})\s*(?:км)?", value, re.I)
         if year_fix or mileage_fix:
             if year_fix:
                 d["year"] = year_fix.group(1)
+                d["description"] = re.sub(r"(?<!\d)(?:19\d{2}|20\d{2}|21\d{2})(?!\d)(?=\s*(?:рік|року|р\.))", d["year"], d["description"], flags=re.I)
             if mileage_fix and d["category"] == "🚗 Авторинок":
-                d["spec"] = re.sub(r"\\s", "", mileage_fix.group(1))
+                d["spec"] = re.sub(r"\s", "", mileage_fix.group(1))
+                d["description"] = re.sub(r"(пробіг\s*[:—–-]?\s*)\d[\d\s]{0,9}", lambda match: match.group(1) + d["spec"], d["description"], flags=re.I)
+            d.pop("_ai_description", None)
             # Seller supplied the numbers explicitly. Update only these fields, not AI guesses.
             await m.answer("✅ Оновив указані тобою поля. Перевіряю всі дані повторно.")
             await run_final_ai_review(m, s)
