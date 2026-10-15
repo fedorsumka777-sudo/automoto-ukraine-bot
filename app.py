@@ -108,6 +108,32 @@ async def record_ai_usage(kind, user_id, usage):
         logging.exception("Cannot record AI usage")
 
 
+def managed_group(chat):
+    """Never touch other groups where the bot happens to be an administrator."""
+    identifiers = {str(value).strip().casefold() for value in GROUPS.values() if value}
+    username = ("@" + chat.username).casefold() if chat.username else ""
+    return username in identifiers or str(chat.id) in identifiers
+
+
+@dp.message(F.new_chat_members | F.left_chat_member | F.pinned_message |
+            F.new_chat_title | F.new_chat_photo | F.delete_chat_photo |
+            F.group_chat_created | F.supergroup_chat_created |
+            F.migrate_to_chat_id | F.migrate_from_chat_id)
+async def remove_system_notice(m: Message):
+    """Only Telegram service messages; never regular user content."""
+    if m.chat.type not in ("group", "supergroup") or not managed_group(m.chat):
+        return
+    try:
+        await m.delete()
+        async with db.acquire() as con:
+            await con.execute(
+                "INSERT INTO system_cleanup(chat_id,event) VALUES($1,$2)",
+                m.chat.id, str(m.content_type))
+    except Exception:
+        # Bot needs administrator 'Delete messages' permission.
+        logging.exception("System notice cleanup failed in chat %s", m.chat.id)
+
+
 @dp.message(F.text == "/admin")
 async def show_admin(m: Message):
     if m.chat.type != "private" or not ADMIN_USER_ID or m.from_user.id != ADMIN_USER_ID:
@@ -119,6 +145,7 @@ async def show_admin(m: Message):
         actions = await con.fetch("""SELECT event,count(*) n FROM bot_activity WHERE scope='private'
                AND created_at>=now()-interval '7 days' GROUP BY event ORDER BY n DESC LIMIT 6""")
         ads = await con.fetchval("SELECT count(*) FROM ads")
+        cleanups = await con.fetchval("SELECT count(*) FROM system_cleanup")
         usage = await con.fetch("""SELECT kind,count(*) requests,sum(input_tokens) inp,
                        sum(output_tokens) outp,sum(estimated_usd) usd FROM ai_usage GROUP BY kind ORDER BY kind""")
     labels = {"create":"Створювали оголошення","search":"Шукали","my_ads":"Мої оголошення",
@@ -137,7 +164,7 @@ async def show_admin(m: Message):
         lines.append("Поки немає записів.")
     if AI_INPUT_USD_M == 0 or AI_OUTPUT_USD_M == 0:
         lines.append("⚠️ Вартість у USD не налаштована. Вкажи AI_INPUT_USD_PER_1M і AI_OUTPUT_USD_PER_1M для моделі.")
-    lines += ["", "👥 Групи:"]
+    lines += ["", f"🧹 Видалено системних повідомлень: {cleanups}", "👥 Групи:"]
     for name,group in GROUPS.items():
         try:
             count = await bot.get_chat_member_count(group)
@@ -1242,6 +1269,11 @@ async def lifespan(app: FastAPI):
             estimated_usd NUMERIC(16,8) NOT NULL DEFAULT 0,
             created_at TIMESTAMPTZ NOT NULL DEFAULT now())""")
         await con.execute("CREATE INDEX IF NOT EXISTS ai_usage_created_idx ON ai_usage(created_at)")
+        await con.execute("""CREATE TABLE IF NOT EXISTS system_cleanup(
+            id BIGSERIAL PRIMARY KEY,
+            chat_id BIGINT NOT NULL,
+            event TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now())""")
     await bot.set_my_commands([BotCommand(command="start", description="🚀 Головне меню"),
                                BotCommand(command="help", description="ℹ️ Як користуватися ботом")])
     if ADMIN_USER_ID:
