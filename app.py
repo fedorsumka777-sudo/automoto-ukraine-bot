@@ -531,7 +531,7 @@ def next_question(d):
         ("currency", "💵 Обери валюту:"),
         ("region", "📍 Обери область України:"),
         ("city", "🏘️ Напиши назву міста, селища або села:"),
-        ("contact", "Телефон або Telegram для зв'язку?"),
+        ("contact", "☎️ Введи телефон (10 цифр, наприклад 0180965315) або Telegram @username:"),
         ("photo", "📸 Надішли щонайменше 5 фотографій (можна альбомом), максимум 10."),
         ("description", "📝 Наостанок детально опиши стан і особливості автомобіля:" if d["category"] == "🚗 Авторинок" else "📝 Наостанок детально опиши стан і особливості техніки:" if d["category"] == "🚜 Агромаркет" else "📝 Наостанок детально опиши стан і особливості запчастини:"),
     ]
@@ -596,8 +596,11 @@ def listing_issues(data):
         ):
             if data.get(key) not in allowed:
                 issues.append(label + ": обери відповідь зі списку.")
-    if not str(data.get("price", "")).strip() or not str(data.get("contact", "")).strip():
-        issues.append("💰☎️ Перевір ціну та контакт.")
+    if not str(data.get("price", "")).strip():
+        issues.append("💰 Перевір ціну.")
+    contact = str(data.get("contact", "")).strip()
+    if not (re.fullmatch(r"0[0-9]{9}", contact) or re.fullmatch(r"@[A-Za-z0-9_]{5,32}", contact)):
+        issues.append("☎️ Вкажи телефон у форматі 0180965315 (10 цифр із 0) або Telegram @username.")
     return issues
 
 
@@ -964,13 +967,18 @@ async def wizard(m: Message):
             await m.answer("Введи суму цифрами, без валюти. Наприклад: 8500")
             return
         d[step] = value.replace(",", ".")
+    elif step == "contact":
+        if not (re.fullmatch(r"0[0-9]{9}", value) or re.fullmatch(r"@[A-Za-z0-9_]{5,32}", value)):
+            await m.answer("⚠️ Некоректний контакт. Введи 10 цифр, починаючи з 0 (наприклад 0180965315), або Telegram @username.")
+            return
+        d[step] = value
     elif step == "year":
-        if not re.fullmatch(r"\\d{4}", value) or not 1886 <= int(value) <= date.today().year + 1:
+        if not re.fullmatch(r"\d{4}", value) or not 1886 <= int(value) <= date.today().year + 1:
             await m.answer(f"⚠️ Некоректний рік. Введи рік випуску від 1886 до {date.today().year + 1}.")
             return
         d[step] = value
     elif step == "spec" and d["category"] == "🚗 Авторинок":
-        if not re.fullmatch(r"\\d{1,7}", value):
+        if not re.fullmatch(r"\d{1,7}", value):
             await m.answer("🛣️ Введи реальний пробіг лише цифрами, у кілометрах.")
             return
         d[step] = value
