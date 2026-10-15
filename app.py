@@ -851,6 +851,98 @@ async def publish(m: Message):
         await m.answer("Помилка збереження. Спробуй підтвердити ще раз.", reply_markup=CONFIRM)
 
 
+SEARCH_ALIASES = {
+    "bmw": ("бмв", "бмвe", "бмв", "беемве", "бемве", "бмw", "bmv", "bemve"),
+    "mercedes": ("мерседес", "мерс", "mersedes", "mers", "mercedez"),
+    "volkswagen": ("фольксваген", "фолксваген", "вольксваген", "vw"),
+    "toyota": ("тойота", "тоиота", "toyta"),
+    "audi": ("ауді", "ауди", "audy"),
+    "honda": ("хонда",),
+    "hyundai": ("хюндай", "хундай", "хендай", "хюндаї"),
+    "kia": ("кіа", "киа"),
+    "renault": ("рено", "ренаулт"),
+    "ford": ("форд",),
+    "nissan": ("нісан", "ниссан"),
+    "skoda": ("шкода", "škoda"),
+    "chevrolet": ("шевроле",),
+    "peugeot": ("пежо",),
+    "byd": ("бід", "бид", "бівайді"),
+}
+SEARCH_TRANSLIT = str.maketrans({
+    "а": "a", "б": "b", "в": "v", "г": "h", "ґ": "g", "д": "d", "е": "e",
+    "є": "ye", "ж": "zh", "з": "z", "и": "y", "і": "i", "ї": "yi",
+    "й": "y", "к": "k", "л": "l", "м": "m", "н": "n", "о": "o",
+    "п": "p", "р": "r", "с": "s", "т": "t", "у": "u", "ф": "f",
+    "х": "kh", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "shch",
+    "ь": "", "ю": "yu", "я": "ya", "ы": "y", "э": "e", "ъ": ""
+})
+
+
+def search_variants(query):
+    """Expand known brand spellings without adding unrelated search terms."""
+    raw = query.strip().casefold()
+    variants = {raw}
+    words = raw.split()
+    if not words:
+        return []
+    for canonical, aliases in SEARCH_ALIASES.items():
+        choices = (canonical, *aliases)
+        for word in words:
+            if word in choices:
+                variants.add(canonical)
+                variants.update(choices)
+                variants.add(raw.replace(word, canonical))
+    if any("а" <= letter <= "я" or letter in "іїєґ" for letter in raw):
+        variants.add(raw.translate(SEARCH_TRANSLIT))
+    return sorted(v for v in variants if v)[:40]
+
+
+def ai_search_variants(query):
+    """Optional AI query normalization; never generate ads or change stored data."""
+    if not OPENAI_API_KEY:
+        return []
+    payload = {
+        "model": AI_MODEL, "temperature": 0, "max_tokens": 140,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content": "Ти AutoBot_AI, помічник пошуку оголошень українського авторинку. "
+             "Виправ лише можливі описки, транслітерацію та відомі назви марок або моделей. "
+             "Поверни JSON {\\"variants\\": [\\"...\\"]}, максимум 4 короткі альтернативні пошукові фрази. "
+             "Не вигадуй оголошення або характеристики; не змінюй сутність запиту."},
+            {"role": "user", "content": query}
+        ]
+    }
+    req = urllib.request.Request(
+        "https://api.openai.com/v1/chat/completions",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Authorization": "Bearer " + OPENAI_API_KEY, "Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=8) as response:
+        output = json.load(response)
+    suggestions = json.loads(output["choices"][0]["message"]["content"]).get("variants", [])
+    if not isinstance(suggestions, list):
+        return []
+    return [x.strip() for x in suggestions[:4] if isinstance(x, str) and 2 <= len(x.strip()) <= 60]
+
+
+async def find_ads(category, variants):
+    variants = list(dict.fromkeys(v.casefold().strip() for v in variants if v and v.strip()))[:50]
+    patterns = ["%" + v.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%" for v in variants]
+    if not patterns:
+        return []
+    async with db.acquire() as con:
+        return await con.fetch(
+            """SELECT id,category,title,price,city FROM ads
+            WHERE status='active' AND ($1::text IS NULL OR category=$1)
+            AND EXISTS (
+                SELECT 1 FROM unnest($2::text[]) p
+                WHERE title ILIKE p ESCAPE '\\' OR description ILIKE p ESCAPE '\\'
+                      OR city ILIKE p ESCAPE '\\'
+            )
+            ORDER BY id DESC LIMIT 30""", category, patterns)
+
+
 @dp.message()
 async def wizard(m: Message):
     if not m.from_user or m.chat.type != "private":
@@ -973,15 +1065,15 @@ async def wizard(m: Message):
         if len(value) < 2 or len(value) > 100:
             await m.answer("Введи від 2 до 100 символів.")
             return
-        pattern = "%" + value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
         category = d.get("category")
-        async with db.acquire() as con:
-            rows = await con.fetch(
-                """SELECT id,category,title,price,city FROM ads
-                WHERE status='active' AND ($1::text IS NULL OR category=$1)
-                AND (title ILIKE $2 ESCAPE '\\' OR description ILIKE $2 ESCAPE '\\'
-                     OR city ILIKE $2 ESCAPE '\\')
-                ORDER BY id DESC LIMIT 30""", category, pattern)
+        variants = search_variants(value)
+        rows = await find_ads(category, variants)
+        if not rows and OPENAI_API_KEY:
+            try:
+                ai_variants = await asyncio.wait_for(asyncio.to_thread(ai_search_variants, value), timeout=10)
+                rows = await find_ads(category, variants + ai_variants)
+            except Exception:
+                logging.exception("AI search normalization failed")
         sessions.pop(m.from_user.id, None)
         if rows:
             await m.answer(f"🔎 Знайдено {len(rows)} оголошень. Обери потрібне:",
