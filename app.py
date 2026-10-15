@@ -629,7 +629,7 @@ async def run_final_ai_review(m, s, user=None):
         lines.append("✅ Мовних виправлень не потрібно.")
     if tips:
         lines.append("💡 Підказки:\n" + "\n".join("• " + t for t in tips))
-    lines.append("Застосувати виправлення чи залишити власний текст?")
+    lines.append("Можеш написати додаткові відомості про товар — я додам їх до опису та ще раз перевірю. Або обери одну з кнопок нижче.")
     s["step"] = "ai_final_review"
     await m.answer("\n\n".join(lines), reply_markup=AI_FINAL_CHOICES)
 
@@ -739,6 +739,19 @@ async def wizard(m: Message):
         return
     if step == "preview":
         await m.answer("Обери «✅ Опублікувати» або «✏️ Почати заново».", reply_markup=CONFIRM)
+        return
+    if step == "ai_final_review" and value not in ("✅ Застосувати виправлення", "➡️ Залишити мій текст"):
+        if not value or len(value) > 700:
+            await m.answer("✍️ Напиши уточнення текстом (до 700 символів).", reply_markup=AI_FINAL_CHOICES)
+            return
+        base = d.get("_ai_description") or d["description"]
+        if len(base) + len(value) + 2 > 500:
+            await m.answer("⚠️ Опис разом з уточненням завеликий (максимум 500 символів). Скороти уточнення.", reply_markup=AI_FINAL_CHOICES)
+            return
+        d["description"] = base + "\n" + value
+        d.pop("_ai_description", None)
+        await m.answer("📝 Додав твої уточнення до опису. Перевіряю оновлений текст ще раз…")
+        await run_final_ai_review(m, s)
         return
     if step == "ai_final_review":
         if value == "✅ Застосувати виправлення":
