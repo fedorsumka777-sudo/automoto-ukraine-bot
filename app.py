@@ -680,11 +680,13 @@ async def publish(m: Message):
 
         def make_album():
             # Telegram media objects cannot be reused across send requests.
-            items = [InputMediaDocument(media=fid) if kind == "document"
-                     else InputMediaPhoto(media=fid) for fid, kind in d["photos"]]
-            items[0].caption = caption
-            items[0].parse_mode = "HTML"
-            return items
+            return [
+                (InputMediaDocument(media=fid, caption=caption, parse_mode="HTML")
+                 if kind == "document" else InputMediaPhoto(media=fid, caption=caption, parse_mode="HTML"))
+                if index == 0 else
+                (InputMediaDocument(media=fid) if kind == "document" else InputMediaPhoto(media=fid))
+                for index, (fid, kind) in enumerate(d["photos"])
+            ]
 
         results = []
         try:
