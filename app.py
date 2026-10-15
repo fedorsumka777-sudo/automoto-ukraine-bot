@@ -549,21 +549,21 @@ def render_ad(d, user_id, username, first_name, ad_id=None):
     )
     lines = [
         f"<b>{html.escape(category.upper())}</b>",
-        f"🚘 Автомобіль: <b>{html.escape(d['title'])}</b>" if category == "🚗 Авторинок" else f"🏷️ <b>{html.escape(d['title'])}</b>",
-        f"{html.escape(extra[0][1].split('?')[0])}: {html.escape(d[extra[0][0]])}",
-        f"{html.escape(extra[1][1].split('?')[0])}: {html.escape(d[extra[1][0]])}",
-        *([f"🎨 Колір: {html.escape(d['color'])}"] if category == "🚗 Авторинок" and d.get("color") else []),
-        *([f"⛽ Пальне: {html.escape(d['fuel'])}"] if category == "🚗 Авторинок" and d.get("fuel") else []),
-        *([f"⚙️ Коробка передач: {html.escape(d['gearbox'])}"] if category == "🚗 Авторинок" and d.get("gearbox") else []),
-        *([f"🚨 Участь у ДТП: {html.escape(d['accident'])}"] if category == "🚗 Авторинок" and d.get("accident") else []),
-        f"💰 <b>{html.escape(d['price'])} {html.escape(d['currency'])}</b>",
-        f"📍 {html.escape(d.get('region', ''))}, {html.escape(d['city'])}",
-        f"☎️ {html.escape(d['contact'])}",
-        f"👤 Продавець: {who}",
+        f"🚘 <b><i>Автомобіль:</i></b> {html.escape(d['title'])}" if category == "🚗 Авторинок" else f"🏷️ <b>{html.escape(d['title'])}</b>",
+        f"{html.escape(extra[0][1].split('?')[0].split()[0])} <b><i>{html.escape(extra[0][1].split('?')[0].split(maxsplit=1)[1])}:</i></b> {html.escape(d[extra[0][0]])}",
+        f"{html.escape(extra[1][1].split('?')[0].split()[0])} <b><i>{html.escape(extra[1][1].split('?')[0].split(maxsplit=1)[1])}:</i></b> {html.escape(d[extra[1][0]])}",
+        *([f"🎨 <b><i>Колір:</i></b> {html.escape(d['color'])}"] if category == "🚗 Авторинок" and d.get("color") else []),
+        *([f"⛽ <b><i>Пальне:</i></b> {html.escape(d['fuel'])}"] if category == "🚗 Авторинок" and d.get("fuel") else []),
+        *([f"⚙️ <b><i>Коробка передач:</i></b> {html.escape(d['gearbox'])}"] if category == "🚗 Авторинок" and d.get("gearbox") else []),
+        *([f"🚨 <b><i>Участь у ДТП:</i></b> {html.escape(d['accident'])}"] if category == "🚗 Авторинок" and d.get("accident") else []),
+        f"💰 <b><i>Ціна:</i></b> <b>{html.escape(d['price'])} {html.escape(d['currency'])}</b>",
+        f"📍 <b><i>Місцезнаходження:</i></b> {html.escape(d.get('region', ''))}, {html.escape(d['city'])}",
+        f"☎️ <b><i>Контакт:</i></b> {html.escape(d['contact'])}",
+        f"👤 <b><i>Продавець:</i></b> {who}",
     ]
     if ad_id is not None:
         lines.append(f"🔖 Оголошення №{ad_id}")
-    lines.append(f"📝 {html.escape(d['description'])}")
+    lines.append(f"📝 <b><i>Опис:</i></b> {html.escape(d['description'])}")
     return "\n".join(lines)
 
 
