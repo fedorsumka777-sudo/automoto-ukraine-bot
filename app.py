@@ -732,7 +732,7 @@ async def show_preview(m, s, user=None):
                    ". Перевір оголошення:")
     await m.answer(render_ad(s["data"], user.id, user.username, user.first_name),
                    parse_mode="HTML", reply_markup=CONFIRM)
-    await m.answer("✅ Опублікувати чи ✏️ Почати заново?", reply_markup=CONFIRM)
+    await m.answer("✅ Опублікувати чи ✏️ Редагувати пункт?", reply_markup=CONFIRM)
 
 
 async def run_final_ai_review(m, s, user=None):
@@ -810,7 +810,7 @@ async def publish(m: Message):
     if not m.from_user or m.chat.type != "private":
         return
     s = sessions.get(m.from_user.id)
-    if not s or s["step"] != "preview" or len(s["data"].get("photos", [])) < 1:
+    if not s or s["step"] != "preview" or not any(kind in ("photo", "document") for _, kind in s["data"].get("photos", [])):
         await m.answer("Немає готового оголошення. Натисни /start.")
         return
     issues = listing_issues(s["data"])
@@ -956,7 +956,7 @@ def ai_search_variants(query):
         output = json.load(response)
     suggestions = json.loads(output["choices"][0]["message"]["content"]).get("variants", [])
     if not isinstance(suggestions, list):
-        return []
+        return [], output.get("usage", {})
     return [x.strip() for x in suggestions[:4] if isinstance(x, str) and 2 <= len(x.strip()) <= 60], output.get("usage", {})
 
 
